@@ -30,6 +30,59 @@ crow run). Never an attack on a remote host, never a money move. Prefer the move
 that resolves the current open question (the newest crow's verdict, a new device's
 identity). `""` when the wire is quiet or the move is not clearly warranted.
 
+## The third surface — WIRE VISION (a place, not a channel)
+Files: `wirevision.py` (world builder), `wiregame.py` (renderer), a "Vision" tab
+in `app.py`.
+
+WIRE VISION turns the wire channel's own local ground truth into a low-poly
+first-person place you walk: the LAN floor (the heart = your host, devices = dye
+contacts, gates = what each talks to, crows overhead, IDS rifts), then down the
+central well through the protocol strata — the talking place (application), the
+sorting office (transport), the addressing plains (internet), the wire itself
+(link) — to the sparks: the last electron, the edge. Friendly names by default;
+the real term is one keypress away, so a beginner and an expert stand on the same
+ground.
+
+It is **not** a brain channel and has **no** readout schema. It never calls the
+brain and never runs a tool or touches the network — it only reads the same
+local files `wire.py` reads. Ground truth only: a device, domain, port, IP or MAC
+that is not in those files is not in the world.
+
+It stays honest about how sure it is: it separates **observed** (a MAC, the
+last-seen IP and when it was seen, the TLS/SNI names and how often) from
+**inferred** (device type, what the traffic means, any human name), flags names
+the device merely *announced* and devices with no name at all, marks your own
+host (`◈ this machine (you)`) and the gateway (`the way out`), flags stale and
+other-segment records, and says plainly that the whole world is a **memory** —
+Vision never touches the network, it replays the last thing dye and the crows
+saw.
+
+Its look and its words are borrowed from *Ghost in the Shell* (1995) — but this is
+**flavour over real ground truth, never story**. Deep cyan-teal "wet glass"
+ground, phosphor code-green glyph rain as the sea of information, cyan schematic
+linework, and a single amber reticle for "a target has been acquired." The
+vocabulary is re-skinned, not invented: the LAN is **the shell**, its readable
+identity is the **ghost** it carries, a device that talks to the net is a
+**cyberbrain**, the descent is a **dive** into the sea of information, and a name
+two or more shells both reach is a **stand-alone complex** (derived from the
+files, no single origin). Real fields only — no fake data, no plot.
+
+The **dive** is how the sea's vastness is shown honestly. You fall down the
+central well, the glyph rain thickening with every stratum, until at the edge you
+can step past the last electron — and the descent never bottoms out. The open sea
+below the edge is unbounded, alive and endless, but it holds **no named entity and
+carries no data**: every device, domain, port, IP and MAC still lives above the
+edge, and everything below is atmosphere drawn from nothing. `[E]` rises back to
+the edge, `[Home]` to the surface.
+
+The floor is drawn as **rooms**: the segment you are on right now is the lit room
+inside a low wall, and every other segment in the files sits outside that wall as
+a walled **ruin** you walk into through a door — each labelled with how long ago
+it was seen, so a network you have left is a place you can stand in, not a live
+one. A **sources** list names each local file the world is built from, marks it
+fresh or stale, and says what would refresh it (run dye, fly a crow) — without
+running anything itself.
+
 ## Rules both channels share
 * You have **no tools**. Do NOT run any tool, do NOT open or search for any file —
   everything you need is inlined in your prompt.

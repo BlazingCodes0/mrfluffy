@@ -21,6 +21,14 @@ FLUFFY = Path.home() / "mrfluffy"
 sys.path.insert(0, str(FLUFFY))
 import news, readout, wireout, brain  # noqa: E402
 
+try:
+    import wiregame  # the playable wire (low-poly first-person)
+except Exception as _wg_err:  # keep the app alive even without a GL stack
+    wiregame = None
+    _WIREGAME_ERR = str(_wg_err)
+else:
+    _WIREGAME_ERR = ""
+
 LOGS = FLUFFY / "logs"
 LATEST = LOGS / "news_readout_latest.json"
 READOUTS = LOGS / "news_readouts.jsonl"
@@ -84,6 +92,12 @@ class Fluffy(QMainWindow):
         lv.addWidget(self.b_wire_store)
 
         lv.addWidget(_sep())
+        lv.addWidget(QLabel("Wire Vision (play the wire)"))
+        self.b_vision = QPushButton("Open wire vision")
+        self.b_vision.setToolTip("Walk the wire: the LAN floor, then fall the protocol stack to the last electron")
+        lv.addWidget(self.b_vision)
+
+        lv.addWidget(_sep())
         self.b_daemon = QPushButton("Start daemon")
         lv.addWidget(self.b_daemon)
 
@@ -116,11 +130,24 @@ class Fluffy(QMainWindow):
         wv.addWidget(self.wire_view, 1)
         self.tabs.addTab(wire_panel, "Wire")
 
+        # ---- third panel: the playable wire (low-poly first-person) ----
+        self.vision_panel = QWidget(); vv = QVBoxLayout(self.vision_panel)
+        vv.setContentsMargins(0, 0, 0, 0)
+        self.vision = None
+        if wiregame is not None:
+            self.vision = wiregame.WireVisionTab()
+            vv.addWidget(self.vision)
+        else:
+            msg = QLabel(f"Wire Vision unavailable — no OpenGL stack here.\n({_WIREGAME_ERR})")
+            msg.setWordWrap(True)
+            vv.addWidget(msg)
+        self.tabs.addTab(self.vision_panel, "Vision")
+
         split.addWidget(self.tabs)
         split.setStretchFactor(1, 3)
         outer.addWidget(split, 1)
 
-        footer = QLabel("Two channels, two panels: the News reader (tape) and the Wire king (network). Brain calls go over the warm local server, shared budget-gated.")
+        footer = QLabel("Three panels: the News reader (tape), the Wire king (network), and Wire Vision (walk the wire). The game reads local ground truth only — no network, no brain calls.")
         footer.setStyleSheet("color:#9ca3af;font-size:10px")
         outer.addWidget(footer)
 
@@ -135,6 +162,7 @@ class Fluffy(QMainWindow):
         self.b_wire_read.clicked.connect(lambda: self.do_wire_read(force=False))
         self.b_wire_force.clicked.connect(lambda: self.do_wire_read(force=True))
         self.b_wire_store.clicked.connect(self.do_wire_store)
+        self.b_vision.clicked.connect(self.open_vision)
         self.read_done.connect(self._read_done)
         self.wire_read_done.connect(self._wire_read_done)
 
@@ -316,6 +344,14 @@ class Fluffy(QMainWindow):
             self.wire_view.setPlainText(f"(wire read failed: {r.get('error','?')})")
         self.refresh_status(); self.refresh_wire_history(); self.refresh_log()
 
+    def open_vision(self):
+        if self.vision is None:
+            self.status.setText("wire vision unavailable (no OpenGL stack)")
+            return
+        self.tabs.setCurrentWidget(self.vision_panel)
+        self.vision.build()
+        self.status.setText("wire vision: built the playable wire — WASD to move, E to interact")
+
     def do_wire_store(self):
         r = wireout.store()
         if r.get("stored"):
@@ -382,6 +418,11 @@ class Fluffy(QMainWindow):
                 self._daemon.terminate()
             except Exception:
                 pass
+        if self.vision is not None:
+            try:
+                self.vision.shutdown()
+            except Exception:
+                pass
         ev.accept()
 
 
@@ -391,6 +432,11 @@ def _sep():
 
 
 def main():
+    if wiregame is not None:
+        try:
+            wiregame.configure_gl()   # compatibility context, before QApplication
+        except Exception:
+            pass
     app = QApplication(sys.argv)
     app.setApplicationName("Mr.Fluffy")
     w = Fluffy()
