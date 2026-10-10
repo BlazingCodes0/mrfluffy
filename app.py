@@ -8,7 +8,7 @@ All model calls go through brain.py (sandboxed + egress-locked).
 import json, subprocess, sys, os, signal, time
 from pathlib import Path
 
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -23,6 +23,8 @@ LATEST = LOGS / "news_readout_latest.json"
 READOUTS = LOGS / "news_readouts.jsonl"
 DAEMON_LOG = LOGS / "daemon.log"
 PIDFILE = LOGS / "gui_daemon.pid"
+THESIS = FLUFFY / "docs" / "NEWS_THESIS.md"
+PROMOTIONS = LOGS / "promotions.jsonl"
 
 
 def _mono(size=10):
@@ -31,6 +33,8 @@ def _mono(size=10):
 
 
 class Fluffy(QMainWindow):
+    read_done = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Mr.Fluffy — the reader")
@@ -58,8 +62,9 @@ class Fluffy(QMainWindow):
         self.b_read_now = QPushButton("Read now")
         self.b_force = QPushButton("Force re-read")
         self.b_news = QPushButton("Refresh news")
+        self.b_promote = QPushButton("Promote thesis update")
         self.b_daemon = QPushButton("Start daemon")
-        for b in (self.b_read_now, self.b_force, self.b_news):
+        for b in (self.b_read_now, self.b_force, self.b_news, self.b_promote):
             lv.addWidget(b)
         lv.addWidget(_sep())
         lv.addWidget(self.b_daemon)
@@ -82,7 +87,7 @@ class Fluffy(QMainWindow):
         split.setStretchFactor(1, 3)
         outer.addWidget(split, 1)
 
-        footer = QLabel("BlackHorse is the trading horse; Mr.Fluffy only reads. Calls are sandboxed + egress-locked.")
+        footer = QLabel("BlackHorse is the trading horse; Mr.Fluffy only reads. Brain calls go over the warm local server, budget-gated.")
         footer.setStyleSheet("color:#9ca3af;font-size:10px")
         outer.addWidget(footer)
 
@@ -91,7 +96,9 @@ class Fluffy(QMainWindow):
         self.b_force.clicked.connect(lambda: self.do_read(force=True))
         self.b_news.clicked.connect(self.do_news)
         self.b_daemon.clicked.connect(self.toggle_daemon)
+        self.b_promote.clicked.connect(self.do_promote)
         self.history.activated.connect(self.load_history)
+        self.read_done.connect(self._read_done)
 
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(15000)
         self.refresh()
@@ -132,10 +139,12 @@ class Fluffy(QMainWindow):
     def load_latest(self):
         entry = readout._load_json(LATEST, {})
         ro = entry.get("readout")
-        if ro:
-            self.view.setPlainText(readout.render(ro))
-        else:
-            self.view.setPlainText("(no readout yet — click 'Read now')")
+        text = readout.render(ro) if ro else "(no readout yet — click 'Read now')"
+        if self.history.currentData() != -1:
+            return  # user is browsing history; don't yank the view
+        if self.view.toPlainText() == text:
+            return  # unchanged — keep scroll position
+        self.view.setPlainText(text)
 
     def refresh_history(self):
         try:
@@ -176,9 +185,12 @@ class Fluffy(QMainWindow):
         self.status.setText("reading… (news → model → render)")
         import threading
         def _work():
-            r = readout.run(force=force)
+            try:
+                r = readout.run(force=force)
+            except Exception as e:
+                r = {"error": str(e)}
             self._last_read = r
-            QTimer.singleShot(0, self._read_done)
+            self.read_done.emit()
         threading.Thread(target=_work, daemon=True).start()
 
     def _read_done(self):
@@ -192,6 +204,30 @@ class Fluffy(QMainWindow):
         else:
             self.view.setPlainText(f"(read failed: {r.get('error','?')})")
         self.refresh_status(); self.refresh_history(); self.refresh_log()
+
+    def do_promote(self):
+        """User confirms the latest readout's proposed thesis update into NEWS_THESIS.md."""
+        entry = readout._load_json(LATEST, {})
+        ro = entry.get("readout") or {}
+        upd = (ro.get("thesis_update") or "").strip()
+        if not upd:
+            self.status.setText("nothing to promote — latest readout has no thesis_update")
+            return
+        ts = time.strftime("%Y-%m-%d %H:%M", time.localtime())
+        ret = QMessageBox.question(
+            self, "Promote thesis update?",
+            f"User-confirm this thesis change into docs/NEWS_THESIS.md?\n\n{upd}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        block = f"\n## {ts} — user-promoted update\n\n{upd}\n"
+        THESIS.parent.mkdir(parents=True, exist_ok=True)
+        with THESIS.open("a") as fh:
+            fh.write(block)
+        PROMOTIONS.parent.mkdir(parents=True, exist_ok=True)
+        with PROMOTIONS.open("a") as fh:
+            fh.write(json.dumps({"ts": time.time(), "thesis_update": upd}) + "\n")
+        self.status.setText(f"promoted thesis update ({ts}) into NEWS_THESIS.md")
 
     def do_news(self):
         self.status.setText("fetching news…")

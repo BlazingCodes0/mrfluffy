@@ -94,6 +94,14 @@ def build_packet(ctx: dict) -> str:
 
 
 def _parse(text: str) -> dict:
+    """Pull the readout JSON out of the brain's reply.
+
+    The old code cut from the FIRST '{' to the LAST '}', which turned
+    'valid JSON + trailing prose (or a second object)' into two concatenated
+    JSON values -> json.JSONDecodeError "Extra data" -> the panel showed
+    '(read failed)' and the fingerprint never advanced, so the daemon retried
+    and failed every cycle. Now we decode the FIRST complete JSON object and
+    ignore anything after it (and prefer one that looks like a readout)."""
     t = text.strip()
     if "```" in t:
         parts = t.split("```")
@@ -104,10 +112,23 @@ def _parse(text: str) -> dict:
             if p.startswith("{"):
                 t = p
                 break
-    start, end = t.find("{"), t.rfind("}")
-    if start >= 0 and end > start:
-        t = t[start:end + 1]
-    return json.loads(t)
+    decoder = json.JSONDecoder()
+    candidates, i = [], t.find("{")
+    while i != -1:
+        try:
+            obj, end = decoder.raw_decode(t, i)
+        except (json.JSONDecodeError, ValueError):
+            i = t.find("{", i + 1)
+            continue
+        if isinstance(obj, dict):
+            candidates.append(obj)
+        i = t.find("{", end)
+    if not candidates:
+        raise ValueError("no JSON object found in brain reply")
+    for c in candidates:
+        if any(k in c for k in ("one_liner", "dots", "confidence", "what_changed")):
+            return c
+    return candidates[0]
 
 
 def render(ro: dict) -> str:
