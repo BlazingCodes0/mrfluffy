@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Mr.Fluffy GUI — the reader's window.
+"""Mr.Fluffy GUI — news + wire, two separate panels.
 
-Shows the latest readout, the readout history, live budget/daemon status, and the
-daemon log. Buttons let you refresh news, take a readout now, or force a re-read.
-All model calls go through brain.py (sandboxed + egress-locked).
+The News tab shows the crypto reader's latest readout (grouped as-is). The Wire
+tab is a totally separate panel: the network analyst's readout of who is on the
+wire, what each talks to, crow verdicts, IDS alerts, lifeline health — with its
+own history. Buttons control each channel independently. All model calls go
+through brain.py (sandboxed + egress-locked, shared budget).
 """
 import json, subprocess, sys, os, signal, time
 from pathlib import Path
@@ -12,15 +14,18 @@ from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QTextEdit, QPlainTextEdit, QComboBox, QSplitter, QFrame, QMessageBox)
+    QPushButton, QTextEdit, QPlainTextEdit, QComboBox, QSplitter, QFrame,
+    QTabWidget, QMessageBox)
 
 FLUFFY = Path.home() / "mrfluffy"
 sys.path.insert(0, str(FLUFFY))
-import news, readout, brain  # noqa: E402
+import news, readout, wireout, brain  # noqa: E402
 
 LOGS = FLUFFY / "logs"
 LATEST = LOGS / "news_readout_latest.json"
 READOUTS = LOGS / "news_readouts.jsonl"
+WIRE_LATEST = LOGS / "wire_readout_latest.json"
+WIRE_READOUTS = LOGS / "wire_readouts.jsonl"
 DAEMON_LOG = LOGS / "daemon.log"
 PIDFILE = LOGS / "gui_daemon.pid"
 THESIS = FLUFFY / "docs" / "NEWS_THESIS.md"
@@ -34,13 +39,15 @@ def _mono(size=10):
 
 class Fluffy(QMainWindow):
     read_done = pyqtSignal()
+    wire_read_done = pyqtSignal()
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Mr.Fluffy — the reader")
+        self.setWindowTitle("Mr.Fluffy — news + wire")
         self.resize(1180, 760)
         self._daemon = None
         self._busy = False
+        self._wire_busy = False
 
         root = QWidget(); self.setCentralWidget(root)
         outer = QVBoxLayout(root)
@@ -50,7 +57,7 @@ class Fluffy(QMainWindow):
 
         split = QSplitter(Qt.Orientation.Horizontal)
 
-        # ---- left: controls + status ----
+        # ---- left: controls + status (channel-agnostic) ----
         left = QWidget(); lv = QVBoxLayout(left)
         self.status = QLabel("status: —"); self.status.setWordWrap(True)
         self.budget = QLabel("budget: —"); self.budget.setWordWrap(True)
@@ -59,19 +66,26 @@ class Fluffy(QMainWindow):
             lv.addWidget(w)
 
         lv.addWidget(_sep())
-        self.b_read_now = QPushButton("Read now")
-        self.b_force = QPushButton("Force re-read")
+        lv.addWidget(QLabel("News panel (the reader)"))
+        self.b_read_now = QPushButton("Read news now")
+        self.b_force = QPushButton("Force news re-read")
         self.b_news = QPushButton("Refresh news")
         self.b_promote = QPushButton("Promote thesis update")
-        self.b_daemon = QPushButton("Start daemon")
         for b in (self.b_read_now, self.b_force, self.b_news, self.b_promote):
             lv.addWidget(b)
-        lv.addWidget(_sep())
-        lv.addWidget(self.b_daemon)
 
         lv.addWidget(_sep())
-        lv.addWidget(QLabel("History"))
-        self.history = QComboBox(); lv.addWidget(self.history)
+        lv.addWidget(QLabel("Wire panel (the vision)"))
+        self.b_wire_read = QPushButton("Read wire now")
+        self.b_wire_force = QPushButton("Force wire re-read")
+        self.b_wire_store = QPushButton("Store wire read")
+        lv.addWidget(self.b_wire_read)
+        lv.addWidget(self.b_wire_force)
+        lv.addWidget(self.b_wire_store)
+
+        lv.addWidget(_sep())
+        self.b_daemon = QPushButton("Start daemon")
+        lv.addWidget(self.b_daemon)
 
         lv.addWidget(_sep())
         lv.addWidget(QLabel("Daemon log"))
@@ -81,13 +95,32 @@ class Fluffy(QMainWindow):
 
         split.addWidget(left)
 
-        # ---- right: readout ----
+        # ---- right: two separate panels (tabs) ----
+        self.tabs = QTabWidget()
+
+        news_panel = QWidget(); nv = QVBoxLayout(news_panel)
+        news_bar = QHBoxLayout()
+        news_bar.addWidget(QLabel("News history"))
+        self.history = QComboBox(); news_bar.addWidget(self.history, 1)
+        nv.addLayout(news_bar)
         self.view = QTextEdit(); self.view.setReadOnly(True); self.view.setFont(_mono(10))
-        split.addWidget(self.view)
+        nv.addWidget(self.view, 1)
+        self.tabs.addTab(news_panel, "News")
+
+        wire_panel = QWidget(); wv = QVBoxLayout(wire_panel)
+        wire_bar = QHBoxLayout()
+        wire_bar.addWidget(QLabel("Wire history"))
+        self.wire_history = QComboBox(); wire_bar.addWidget(self.wire_history, 1)
+        wv.addLayout(wire_bar)
+        self.wire_view = QTextEdit(); self.wire_view.setReadOnly(True); self.wire_view.setFont(_mono(10))
+        wv.addWidget(self.wire_view, 1)
+        self.tabs.addTab(wire_panel, "Wire")
+
+        split.addWidget(self.tabs)
         split.setStretchFactor(1, 3)
         outer.addWidget(split, 1)
 
-        footer = QLabel("BlackHorse is the trading horse; Mr.Fluffy only reads. Brain calls go over the warm local server, budget-gated.")
+        footer = QLabel("Two channels, two panels: the News reader (tape) and the Wire king (network). Brain calls go over the warm local server, shared budget-gated.")
         footer.setStyleSheet("color:#9ca3af;font-size:10px")
         outer.addWidget(footer)
 
@@ -98,7 +131,12 @@ class Fluffy(QMainWindow):
         self.b_daemon.clicked.connect(self.toggle_daemon)
         self.b_promote.clicked.connect(self.do_promote)
         self.history.activated.connect(self.load_history)
+        self.wire_history.activated.connect(self.load_wire_history)
+        self.b_wire_read.clicked.connect(lambda: self.do_wire_read(force=False))
+        self.b_wire_force.clicked.connect(lambda: self.do_wire_read(force=True))
+        self.b_wire_store.clicked.connect(self.do_wire_store)
         self.read_done.connect(self._read_done)
+        self.wire_read_done.connect(self._wire_read_done)
 
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(15000)
         self.refresh()
@@ -109,18 +147,23 @@ class Fluffy(QMainWindow):
         self.refresh_log()
         self.load_latest()
         self.refresh_history()
+        self.load_wire_latest()
+        self.refresh_wire_history()
         if brain.clear_stale_guard():
             self.status.setText("healed a stale egress lockdown (a prior process died mid-call)")
 
     def refresh_status(self):
         st = readout._load_json(readout.STATE, {})
+        wst = wireout._load_json(wireout.STATE, {})
         b = brain.status()
         last = st.get("last_readout_ts")
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if last else "never"
+        wlast = wst.get("last_readout_ts")
+        wwhen = time.strftime("%Y-%m-%d %H:%M", time.localtime(wlast)) if wlast else "never"
         self.status.setText(
-            f"last readout : {when}\n"
-            f"headlines    : {st.get('headline_count','?')}\n"
-            f"fingerprint  : {st.get('fingerprint','?')}")
+            f"news  last    : {when}\n"
+            f"headlines     : {st.get('headline_count','?')} · fp {str(st.get('fingerprint','?'))[:8]}\n"
+            f"wire  last    : {wwhen} · devices {wst.get('devices_seen','?')} · fp {str(wst.get('fingerprint','?'))[:8]}")
         if b["allowed"]:
             self.budget.setText(f"budget: ready · {b['calls_last_hour']}/{b['max_calls_per_hour']} this hour")
             self.budget.setStyleSheet("color:#22c55e")
@@ -176,6 +219,46 @@ class Fluffy(QMainWindow):
         except Exception as ex:
             self.view.setPlainText(f"(could not load: {ex})")
 
+    def load_wire_latest(self):
+        entry = wireout._load_json(WIRE_LATEST, {})
+        ro = entry.get("readout")
+        text = wireout.render(ro) if ro else "(no wire vision yet — click 'Read wire now'; use 'Store wire read' to keep one)"
+        if self.wire_history.currentData() != -1:
+            return
+        if self.wire_view.toPlainText() == text:
+            return
+        self.wire_view.setPlainText(text)
+
+    def refresh_wire_history(self):
+        try:
+            rows = WIRE_READOUTS.read_text().splitlines()[-25:]
+        except Exception:
+            rows = []
+        if self.wire_history.count() == len(rows):
+            return
+        self.wire_history.blockSignals(True)
+        self.wire_history.clear()
+        self.wire_history.addItem("(latest)", -1)
+        for i, line in enumerate(rows):
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            ts = time.strftime("%m-%d %H:%M", time.localtime(e.get("ts", 0)))
+            self.wire_history.addItem(f"{ts} · {str(e.get('readout',{}).get('one_liner',''))[:60]}", i)
+        self.wire_history.blockSignals(False)
+
+    def load_wire_history(self, idx):
+        i = self.wire_history.itemData(idx)
+        if i is None or i < 0:
+            self.load_wire_latest(); return
+        try:
+            rows = WIRE_READOUTS.read_text().splitlines()[-25:]
+            e = json.loads(rows[i])
+            self.wire_view.setPlainText(wireout.render(e.get("readout", {})))
+        except Exception as ex:
+            self.wire_view.setPlainText(f"(could not load: {ex})")
+
     # ---- actions ----
     def do_read(self, force: bool):
         if self._busy:
@@ -204,6 +287,43 @@ class Fluffy(QMainWindow):
         else:
             self.view.setPlainText(f"(read failed: {r.get('error','?')})")
         self.refresh_status(); self.refresh_history(); self.refresh_log()
+
+    def do_wire_read(self, force: bool):
+        if self._wire_busy:
+            return
+        self._wire_busy = True
+        self.b_wire_read.setEnabled(False); self.b_wire_force.setEnabled(False)
+        self.status.setText("reading wire… (network → model → render)")
+        import threading
+        def _work():
+            try:
+                r = wireout.run(force=force)
+            except Exception as e:
+                r = {"error": str(e)}
+            self._last_wire_read = r
+            self.wire_read_done.emit()
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _wire_read_done(self):
+        self._wire_busy = False
+        self.b_wire_read.setEnabled(True); self.b_wire_force.setEnabled(True)
+        r = getattr(self, "_last_wire_read", {})
+        if r.get("text"):
+            self.wire_view.setPlainText(r["text"])
+        elif r.get("skipped"):
+            self.wire_view.setPlainText(f"(no wire vision change — {r['skipped']})\n" + self.wire_view.toPlainText())
+        else:
+            self.wire_view.setPlainText(f"(wire read failed: {r.get('error','?')})")
+        self.refresh_status(); self.refresh_wire_history(); self.refresh_log()
+
+    def do_wire_store(self):
+        r = wireout.store()
+        if r.get("stored"):
+            when = time.strftime("%H:%M", time.localtime(r["stored"]))
+            self.status.setText(f"stored wire vision at {when} to history")
+            self.refresh_wire_history()
+        else:
+            self.status.setText(r.get("error") or "nothing to store yet — read the wire first")
 
     def do_promote(self):
         """User confirms the latest readout's proposed thesis update into NEWS_THESIS.md."""

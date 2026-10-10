@@ -1,8 +1,9 @@
 """Mr.Fluffy daemon.
 
-Every check_interval_seconds: refresh news, if the fingerprint changed AND the
-budget allows, run a full readout cycle. Logged to logs/daemon.log. Uses a flock
-so two daemons can never overlap.
+Every check_interval_seconds: refresh news, and if the fingerprint changed AND the
+budget allows, run a news readout cycle; the same for the WIRE channel (its own
+fingerprint, state and files — entirely separate from the news panel). Logged to
+logs/daemon.log. Uses flock so two daemons can never overlap.
 
 CLI:  python3 daemon.py              # run forever
       python3 daemon.py --once       # one check cycle then exit
@@ -12,6 +13,7 @@ from pathlib import Path
 
 import news
 import readout
+import wireout
 import brain
 
 FLUFFY = Path.home() / "mrfluffy"
@@ -42,16 +44,24 @@ def one_cycle():
     try:
         if brain.clear_stale_guard():
             _log("healed stale egress lockdown (prior process died mid-call)")
-        r = readout.run(force=False)
+    except Exception:
+        pass
+    _one_channel("news", readout.run)
+    _one_channel("wire", wireout.run)
+
+
+def _one_channel(name, run_fn):
+    try:
+        r = run_fn(force=False)
     except Exception as e:
-        _log(f"cycle error: {e}")
+        _log(f"{name} cycle error: {e}")
         return
     if r.get("text"):
-        _log(f"readout ok fp={r['fingerprint']} conf={r['entry']['readout'].get('confidence')}")
+        _log(f"{name} readout ok fp={r['fingerprint']} conf={r['entry']['readout'].get('confidence')}")
     elif r.get("skipped"):
-        _log(f"skipped (no change) fp={r['fingerprint']}")
+        _log(f"{name} skipped (no change) fp={r['fingerprint']}")
     else:
-        _log(f"no readout: {r}")
+        _log(f"{name} no readout: {r}")
 
 
 def main():
