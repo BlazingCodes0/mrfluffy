@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "min_gap_seconds": 120,
+  "max_calls_per_hour": 12,
+  "opencode_cmd": "opencode",
+  "opencode_timeout_seconds": 300,
+  "server_host": "127.0.0.1",
+  "server_port": 4199,
+  "serve_service": "mrfluffy-serve.service",
+  "check_interval_seconds": 300
+}

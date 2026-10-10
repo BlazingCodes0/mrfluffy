@@ -1,0 +1,14 @@
+[Unit]
+Description=Mr.Fluffy persistent opencode server (warm readout session)
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/mrfluffy
+ExecStart=%h/.opencode/bin/opencode serve --port 4199 --hostname 127.0.0.1
+Restart=always
+RestartSec=10
+Environment=HOME=%h
+
+[Install]
+WantedBy=default.target

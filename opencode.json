@@ -1,0 +1,9 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["AGENTS.md"],
+  "agent": {
+    "build": {
+      "description": "Mr.Fluffy the reader: reads news + a memory of past reads, returns a structured readout."
+    }
+  }
+}

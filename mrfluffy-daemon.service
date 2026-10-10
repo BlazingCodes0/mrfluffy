@@ -1,0 +1,14 @@
+[Unit]
+Description=Mr.Fluffy readout daemon
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/mrfluffy
+ExecStart=/usr/bin/python3 %h/mrfluffy/daemon.py
+Restart=on-failure
+RestartSec=15
+Environment=HOME=%h
+
+[Install]
+WantedBy=default.target
