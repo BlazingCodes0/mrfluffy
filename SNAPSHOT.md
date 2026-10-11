@@ -152,16 +152,70 @@ relay, all stdlib, all tested:
   phrase sealed pose → 401 with the real pose kept; Xvfb render + menu smoke
   on a hardened floor.
 
+### 7. The reorganized floor + the step-off fix (2026-10-11)
+User: *"the main wire home is too crowded so lets make room for blackhorse so its
+far from others and lets keep the lan wire related stuff together and nicely
+spaced."* Then: *"how do i step off the platform i keep getting stuck."*
+- **Blackhorse gets a cleared plaza.** The home-device ring in `wirevision.py`
+  now reserves an empty wedge (due +x, `MARKET_APRON_HALF ≈ 32°`) : devices sit
+  on an evenly-spaced ring around the heart, the wedge stays bare, and the LAN
+  cluster (well / heart / media / devices / gates) stays together near the
+  centre. The market gate moved from the middle of the room out to that plaza
+  (`MARKET_GATE_POS = [23, 0.06, 0]`) and stands on its own **violet arrival
+  pad** — wiring rings, a slow sentry sweep and six approach lights —
+  ~11–12 units from the nearest LAN object (a device gate) with everything else
+  farther. Layout arrangement only; which devices/gates exist is untouched real
+  ground truth.
+- **Pads no longer glue you down.** Two bugs in `_market_step` kept players
+  stuck: movement input was dropped entirely while on a platform, and the
+  landing snap re-fired whenever you were inside the pad ring near pad height,
+  dragging you back as you tried to leave. Now you are always free to move: you
+  come to rest on a pad only by **flying down onto it (C)** from above (a single
+  deliberate touch, tracked via `_land_prev_y`), and pressing any key steps you
+  off; a pad never re-grabs a player who is leaving it. HUD hint updated:
+  "step onto a platform = fly down to it (C) · press any key to step off".
+- Verified headless: three home devices at 31.5°/130.5°/229.5°, wedge keeps the
+  ring clear of the gate's azimuth, no draw errors at the new plaza; land →
+  step off → re-land → climb away with no re-snaring; market still enters from
+  the new position and returns to the wire.
+
+### 8. Learn Islam — the room of the Word (2026-10-11)
+User: *"add room called learn islam ... i dont want to make a mockery out of it
+but in today world we are all wired so i want to read and experience it through
+that room ... start with small chapters."*
+- Sourced the real text first: alquran.cloud, editions `quran-uthmani` (Hafs,
+  Uthmani script), `en.transliteration`, `en.sahih` (Saheeh International);
+  stored locally in `quran.py` as a faithful, byte-for-byte copy. Six small
+  surahs to start: 1 Al-Faatiha, 103 Al-Asr, 108 Al-Kawthar, 112 Al-Ikhlaas,
+  113 Al-Falaq, 114 An-Naas (28 verses). Data structure accepts any surah.
+- **The sacred rule in code:** nothing is depicted — no Allah, no prophets,
+  no companions. The hall draws only a dark disc, a soft centre light-column,
+  faint rings and reader markers; the Word is drawn as words on light, on a
+  reading slab in the HUD (Arabic large, right-aligned; transliteration; the
+  Saheeh International translation), with verse numbers, name, about-line and
+  an honesty footer: "a translation opens a door; it is not the Book."
+- The room is reached through a gate on the wire floor on its own cleared plaza
+  due −x (word wedge added to `wirevision`; devices now spread with a general
+  `_device_angles` helper that keeps all plaza wedges bare). `[` `]` or the
+  wheel turn the page, `Home` or the far gate leaves, and the presence relay
+  shares the hall — "for we are all wired."
+- Verified headless: 3 home devices at 71.5°/151.4°/288.5° with both wedges
+  clear; word gate 11.2 units and market gate 17.7 units from the nearest LAN
+  object; 8 pages; enter → read → page (bracket + wheel) → leave → market still
+  opens → rebuild resets the room cleanly.
+
 ## Current state (end of 2026-10-11)
 
-- `wiregame.py` modified (platforms re-dressed + panel is now an in-world
-  overlay) + `wiregate.py` new (untracked); `AGENTS.md` + `SNAPSHOT.md` updated.
-  Last commit on `master`: *"mrfluffy: seal the wire — a ghost layer encrypts +
-  signs traffic, a ward turns away abuse"* (ee99f51).
+- `wiregame.py` + `wirevision.py` modified (floor reorg, market plaza, pad
+  step-off fix); `quran.py` new; `snapshots/config-2026-10-11/` is a dated
+  snapshot of Blackhorse's live configuration (secrets excluded); `AGENTS.md` +
+  `SNAPSHOT.md` updated. This file ships inside the same commit that opened the
+  room of the Word.
 - Open threads: (a) make the amber reticle lock/label the nearest real object in
   3D; (b) polish the market further (crowd density, a sounding bell at the centre
   column, the gate glow — all dressing on top of the real snapshot); (c) optionally
   switch the relay to real TLS later (the ghost weave is stdlib-protected, honest
   about being a weave, not a vow). House rules stand: ground truth only, no
   invented data, flavour not story; the market's platforms/balance/crowd are
-  real, the floor and colours are dressing.
+  real, the floor and colours are dressing; the Quran room's text is a faithful
+  local copy of the mushaf and nothing in it is ever depicted.

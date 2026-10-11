@@ -43,6 +43,14 @@ sorting office (transport), the addressing plains (internet), the wire itself
 the real term is one keypress away, so a beginner and an expert stand on the same
 ground.
 
+The floor is laid out as **rooms, not a jumble**: the LAN cluster stays together
+around the well and the heart — media campfires at the edge of the plaza, the
+home devices on an evenly-spaced ring, each device's gates close beside it — and
+**Blackhorse stands apart** on its own cleared plaza (a reserved wedge on the
+device ring, due +x), its tall gate sitting on a violet arrival pad with a sentry
+sweep, well away from the crowd. The layout is dressing arrangement; which
+devices/gates exist is the real ground truth.
+
 It is **not** a brain channel and has **no** readout schema. It never calls the
 brain and never runs a tool or touches the network — it only reads the same
 local files `wire.py` reads. Ground truth only: a device, domain, port, IP or MAC
@@ -85,10 +93,12 @@ running anything itself.
 
 ## The market (a gate into blackhorse, reached from the wire floor)
 
-A grown-up game inside the wire: on the LAN floor by the well stands a tall dark
-portal — **the gate to BlackHorse**, and `E` beside it opens **the market**, a
-trading floor entered from the wire. Files: `wiregate.py` (the market model +
-the presence relay + gated writes), the rest lives in `wiregame.py`.
+A grown-up game inside the wire: on the LAN floor, out on its own cleared plaza
+(due +x — a dark violet arrival pad with a sentry sweep, deliberately far from
+the well/devices/media crowd) stands a tall dark portal — **the gate to
+BlackHorse**, and `E` beside it opens **the market**, a trading floor entered
+from the wire. Files: `wiregate.py` (the market model + the presence relay +
+gated writes), the rest lives in `wiregame.py`.
 
 - The market is a place **made from blackhorse's own files** (`wiregate.snapshot()`
   reads `config/agents.json`, `config/treasury.json`, `config/trading.json`,
@@ -139,7 +149,39 @@ the presence relay + gated writes), the rest lives in `wiregame.py`.
   the ward count in the HUD. This is real, working protection (tested), not
   scenery.
 
+## The room of the Word (Learn Islam — reached from the wire floor)
+
+On the LAN floor, on its own cleared plaza due −x (a quiet ice-coloured pad with
+pale rings and slow reader-lights — an icy-blue lens of light, standing well
+away from the LAN cluster and from Blackhorse) is **Learn Islam**: the Qur'an
+read as a room in the wire. Files: `quran.py` (the scripture data) + the room
+lives in `wiregame.py` (entered with `E`, `[` `]` or the wheel turns the page,
+`Home`/far gate leave, presence relay shares the hall with other readers).
+
+- **The sacred rule: NOTHING IS DEPICTED.** Islam forbids imaging Allah, the
+  prophets and the companions. No such image has ever been or will ever be
+  produced here. The room draws only a calm dark hall, a soft column of reading
+  light, faint rings, and other users' markers — no figure, no face, no symbol
+  of the Unseen. All sacred words are drawn as **words on light**.
+- **The text is holy and is never a mockery.** `quran.py` is a faithful, local,
+  byte-for-byte copy of a published mushaf (alquran.cloud edition
+  `quran-uthmani`, Hafs / Uthmani script) with `en.transliteration` and the
+  `en.sahih` (Saheeh International) translation. No word is invented,
+  paraphrased, randomized or gamified. A translation is labelled as a
+  translation: "a translation opens a door; it is not the Book."
+- It starts with the six small surahs a new reader can live with (1 Al-Faatiha,
+  103 Al-Asr, 108 Al-Kawthar, 112 Al-Ikhlaas, 113 Al-Falaq, 114 An-Naas). The
+  data structure takes any surah — growing is adding chapters, straight from the
+  mushaf.
+- Same honesty rule as everywhere: the Arabic is the Qur'an (real), the
+  translation is a quoted translation (real, sourced), the surah summary lines
+  are factual, and the hall itself is dressing. Learning comes from a teacher
+  and the tafsir, not from the wire.
+
 ## Rules both channels share
+* **The Qur'an is the word of Allah and is never a game.** The room of the Word
+  may only show its authentic, sourced text and never an image or mockery of
+  Allah, the prophets or the companions. When in doubt, leave it out.
 * You have **no tools**. Do NOT run any tool, do NOT open or search for any file —
   everything you need is inlined in your prompt.
 * **Never invent** a headline, a number, a device, an IP, a domain, a count, or an

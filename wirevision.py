@@ -40,6 +40,49 @@ MAX_MACS = 14
 MAX_CROWS = 4
 MAX_RIFTS = 6
 
+# the plazas on the home-device ring: reserved empty wedges so each great room
+# stands apart from the LAN cluster (well / heart / media / devices / gates).
+# The wedges are real floor layout (dressing arrangement), never a data change.
+MARKET_APRON_CENTER = 0.0      # due +x — Blackhorse, the market gate
+MARKET_APRON_HALF = 0.55       # ~32° either side stays clear for the plaza
+WORD_APRON_CENTER = math.pi    # due −x — Learn Islam, the room of the Word
+WORD_APRON_HALF = 0.50         # ~28.6° either side stays clear for the hall
+PLAZA_WEDGES = ((MARKET_APRON_CENTER, MARKET_APRON_HALF),
+                (WORD_APRON_CENTER, WORD_APRON_HALF))
+
+
+def _device_angles(n):
+    """Spread n home devices evenly around the ring, always keeping every
+    plaza wedge bare: the LAN stays grouped and nicely spaced, and each of
+    the two great rooms (market, Word) keeps a whole empty quadrant."""
+    if n < 1:
+        return []
+
+    def _norm(a):
+        return a % (2 * math.pi)
+
+    def _inside(a):
+        for c, h in PLAZA_WEDGES:
+            d = (a - c + math.pi) % (2 * math.pi) - math.pi
+            if abs(d) < h:
+                return True
+        return False
+
+    cuts = sorted({0.0, 2 * math.pi} | {_norm(c - h) for c, h in PLAZA_WEDGES}
+                  | {_norm(c + h) for c, h in PLAZA_WEDGES})
+    allowed = [(a, b) for a, b in zip(cuts, cuts[1:])
+               if b - a > 1e-9 and not _inside((a + b) / 2.0)]
+    length = sum(b - a for a, b in allowed)
+    out = []
+    for j in range(n):
+        p = (j + 0.5) / n * length
+        for a, b in allowed:
+            if p <= (b - a) + 1e-9:
+                out.append(a + min(p, b - a))
+                break
+            p -= (b - a)
+    return out
+
 _RE_DOMAIN = re.compile(r"\b([a-z0-9][a-z0-9.-]*\.[a-z]{2,})\b")
 _RE_DOMAIN_COUNT = re.compile(r"\b([a-z0-9][a-z0-9.-]*\.[a-z]{2,})\s*[x×]\s*(\d+)")
 _RE_IPV4 = re.compile(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b")
@@ -188,10 +231,14 @@ def _devices(gw: str = "") -> list:
             counts[r["segment"]] = counts.get(r["segment"], 0) + 1
         home = max(counts, key=counts.get)
     home_rows = [r for r in rows if r["segment"] == home]
-    # your segment = the lit inner room you stand in
+    # your segment = the lit inner room you stand in. Devices sit on an even
+    # ring around the heart, but the plaza wedges stay empty so the market gate
+    # and the room of the Word each have their own cleared quadrant — the LAN
+    # stays together, the two great rooms stand apart.
     m = len(home_rows)
+    angles = _device_angles(m)
     for j, r in enumerate(home_rows):
-        a = -math.pi / 2 + (2 * math.pi * j / m if m else 0.0)
+        a = angles[j]
         r["pos"] = [round(18.0 * math.cos(a), 3), round(18.0 * math.sin(a), 3)]
         r["room"] = home
         r["room_home"] = True

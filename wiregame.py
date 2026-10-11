@@ -19,7 +19,7 @@ Standalone:  python3 wiregame.py
 from __future__ import annotations
 import math, sys, time, hashlib
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QRect, QTimer, pyqtSignal
 from PyQt6.QtGui import (QColor, QFont, QPainter, QPen, QSurfaceFormat, QCursor,
                          QRadialGradient)
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
@@ -34,9 +34,18 @@ from OpenGL.GLU import *
 
 import wirevision
 import wiregate
+import quran
 from wiregate import MARKET_FLOOR_Y, MARKET_R, RETURN_GATE_POS
 
-MARKET_GATE_POS = [6.0, 0.06, -14.0]   # the tall portal to BlackHorse, on the wire floor
+MARKET_GATE_POS = [23.0, 0.06, 0.0]   # the tall portal to BlackHorse — its own cleared plaza, due +x
+
+# the room of the Word (Learn Islam): a calm hall on the far side, due −x.
+# No image, nothing depicted — the room holds only scripture on light.
+WORD_GATE_POS = [-23.0, 0.06, 0.0]
+WORD_FLOOR_Y = -66.0
+WORD_R = 30.0
+WORD_RETURN_POS = [0.0, WORD_FLOOR_Y + 6.0, WORD_R - 7.0]
+WORD_VERSE_PER_PAGE = 5
 
 # index: 0 floor, 1..5 = protocol strata (top -> bottom)
 STRATA_Y = [0.0, -10.0, -20.0, -30.0, -40.0, -50.0]
@@ -150,6 +159,10 @@ class WireGLWidget(QOpenGLWidget):
         self._online = False
         self._ghost_line = ""
         self._beat = 0.0
+        # the room of the Word — Learn Islam, read in the wire (no imagery)
+        self.word = False
+        self._word_pages = []
+        self.word_page = 0
         self._last_t = time.time()
         self._hud_msg = ""
         self._hud_until = 0.0
@@ -210,6 +223,9 @@ class WireGLWidget(QOpenGLWidget):
         self.market_world = None
         self.selected_agent = None
         self.selected = None
+        self.word = False
+        self._word_pages = []
+        self.word_page = 0
         self.pos = [0.0, EYE, 10.0]
         self.yaw = 0.0
         self.pitch = -0.05
@@ -509,7 +525,47 @@ class WireGLWidget(QOpenGLWidget):
             bob = 0.5 * math.sin(t * 1.6 + x)
             self._crow(x, y + 4.0 + bob, z, t)
         # the gate to BlackHorse — the market, entered from the wire
+        self._market_apron(t, y)
         self._draw_market_gate(t, y)
+        # the room of the Word — Learn Islam, on the far side, due −x
+        self._word_apron(t, y)
+        self._draw_word_gate(t, y)
+
+    def _market_apron(self, t, y):
+        """Blackhorse's own arrival pad on the wire floor: a dark violet plaza
+        with wiring rings and a slow sentry sweep, cleared of the LAN cluster so
+        the gate stands apart from the well/devices/media crowd. Dressing only."""
+        gx, gy, gz = MARKET_GATE_POS
+        r = 5.6
+        glColor4f(0.05, 0.03, 0.08, 0.55)
+        glBegin(GL_TRIANGLE_FAN)
+        glVertex3f(gx, y + 0.04, gz)
+        for i in range(33):
+            a = 2 * math.pi * i / 32
+            glVertex3f(gx + r * math.cos(a), y + 0.045, gz + r * math.sin(a))
+        glEnd()
+        for rr, alpha in ((5.6, 0.28), (3.9, 0.45), (2.4, 0.60)):
+            glColor4f(0.55, 0.30, 0.75, alpha)
+            glLineWidth(2.0 if rr < 5.6 else 1.0)
+            glBegin(GL_LINE_LOOP)
+            for i in range(40):
+                a = 2 * math.pi * i / 40
+                glVertex3f(gx + rr * math.cos(a), y + 0.05, gz + rr * math.sin(a))
+            glEnd()
+        # a slow sentry sweep around the plaza, watching the money
+        rot = t * 0.4
+        glColor4f(0.85, 0.55, 0.25, 0.45)
+        glLineWidth(1.5)
+        glBegin(GL_LINES)
+        glVertex3f(gx, y + 0.06, gz)
+        glVertex3f(gx + r * math.cos(rot), y + 0.06, gz + r * math.sin(rot))
+        glEnd()
+        # six small marker lights at the rim, evenly set like an approach path
+        for k in range(6):
+            a = k * 2 * math.pi / 6 + 0.2 * t
+            self._octa(gx + 4.9 * math.cos(a), y + 1.15 + 0.15 * math.sin(t * 2 + k),
+                       gz + 4.9 * math.sin(a), 0.16, (0.95, 0.60, 0.30), squash=1.4)
+        glLineWidth(1.0)
 
     def _draw_market_gate(self, t, y):
         gx, gy, gz = MARKET_GATE_POS
@@ -536,6 +592,64 @@ class WireGLWidget(QOpenGLWidget):
             bx, by = gx + r * math.cos(a), y + 3.2 + r * math.sin(a)
             self._octa(bx, by, gz, 0.26, (0.85, 0.45, 0.15), squash=0.6)
         self._portal(gx, gz, gy, 2.6, (0.95, 0.55, 0.20), t)
+
+    def _word_apron(self, t, y):
+        """Learn Islam's arrival pad on the wire floor: a quiet ice-coloured
+        disc with slow pale rings and a thin sweep of light. Words on light,
+        nothing more — no figure is ever drawn here. Dressing only."""
+        gx, gy, gz = WORD_GATE_POS
+        r = 5.6
+        glColor4f(0.02, 0.04, 0.07, 0.60)
+        glBegin(GL_TRIANGLE_FAN)
+        glVertex3f(gx, y + 0.04, gz)
+        for i in range(33):
+            a = 2 * math.pi * i / 32
+            glVertex3f(gx + r * math.cos(a), y + 0.045, gz + r * math.sin(a))
+        glEnd()
+        for rr, alpha in ((5.6, 0.22), (3.9, 0.36), (2.4, 0.50)):
+            glColor4f(0.42, 0.62, 0.72, alpha)
+            glLineWidth(2.0 if rr < 5.6 else 1.0)
+            glBegin(GL_LINE_LOOP)
+            for i in range(40):
+                a = 2 * math.pi * i / 40
+                glVertex3f(gx + rr * math.cos(a), y + 0.05, gz + rr * math.sin(a))
+            glEnd()
+        rot = t * 0.25
+        glColor4f(0.72, 0.86, 0.90, 0.30)
+        glLineWidth(1.5)
+        glBegin(GL_LINES)
+        glVertex3f(gx, y + 0.06, gz)
+        glVertex3f(gx + r * math.cos(rot), y + 0.06, gz + r * math.sin(rot))
+        glEnd()
+        # six small reader-lights at the rim, calm and slow
+        for k in range(6):
+            a = k * 2 * math.pi / 6 - 0.05 * t
+            self._octa(gx + 4.9 * math.cos(a), y + 1.05 + 0.1 * math.sin(t * 1.2 + k),
+                       gz + 4.9 * math.sin(a), 0.14, (0.78, 0.92, 1.0), squash=1.4)
+        glLineWidth(1.0)
+
+    def _draw_word_gate(self, t, y):
+        gx, gy, gz = WORD_GATE_POS
+        r = 2.1 + 0.12 * math.sin(t * 0.9)
+        gc = (0.42, 0.62, 0.72)
+        self._cube(gx, y + 3.0, gz, 0.9, 6.2, 0.9, (gc[0] * 0.5, gc[1] * 0.5, gc[2] * 0.5))
+        # a tall lens of light — a doorway, not a figure
+        glColor4f(0.42, 0.72, 0.82, 0.85)
+        glBegin(GL_QUADS)
+        glVertex3f(gx - r, y + 0.5, gz)
+        glVertex3f(gx + r, y + 0.5, gz)
+        glVertex3f(gx + r * 0.7, y + 7.6, gz)
+        glVertex3f(gx - r * 0.7, y + 7.6, gz)
+        glEnd()
+        glLineWidth(2.0)
+        glColor4f(0.88, 0.96, 1.0, 0.9)
+        glBegin(GL_LINE_LOOP)
+        for i in range(48):
+            a = 2 * math.pi * i / 48
+            glVertex3f(gx + r * 0.96 * math.cos(a), y + 2.4 + r * 0.82 * math.sin(a), gz)
+        glEnd()
+        glLineWidth(1.0)
+        self._portal(gx, gz, gy + 1.4, 2.6, (0.72, 0.88, 0.98), t)
 
     # ---- the floor as ROOMS: your segment inside, old segments as ruins -----
     def _ruin_segments(self):
@@ -691,6 +805,11 @@ class WireGLWidget(QOpenGLWidget):
             items.append((gx, y + 6.8, gz,
                           "the gate to BlackHorse \u2014 the market [E], "
                           "reached from the wire floor", (0.95, 0.55, 0.20)))
+            wx, wz = WORD_GATE_POS[0], WORD_GATE_POS[2]
+            items.append((wx, y + 6.6, wz,
+                          "LEARN ISLAM \u2014 the room of the Word [E] \u00b7 "
+                          "the Qur'an read in the wire, words on light",
+                          (0.72, 0.90, 1.0)))
         else:
             st = self.world["strata"][self.active - 1]
             for a in st["artifacts"]:
@@ -730,8 +849,12 @@ class WireGLWidget(QOpenGLWidget):
         elif k == Qt.Key.Key_B:
             if self.market:
                 self.refresh_market()
-            else:
+            elif not self.word:
                 self.request_rebuild.emit()
+        elif k == Qt.Key.Key_BracketLeft:
+            self._word_move(-1)
+        elif k == Qt.Key.Key_BracketRight:
+            self._word_move(1)
         elif k == Qt.Key.Key_T:
             self.show_real = not self.show_real
         elif k == Qt.Key.Key_H:
@@ -739,6 +862,8 @@ class WireGLWidget(QOpenGLWidget):
         elif k == Qt.Key.Key_Home:
             if self.market:
                 self._leave_market()
+            elif self.word:
+                self._leave_word()
             elif self.deep is not None:
                 self._exit_deep(surface=True)
             else:
@@ -752,6 +877,12 @@ class WireGLWidget(QOpenGLWidget):
     def keyReleaseEvent(self, e):
         self.keys.discard(e.key())
         super().keyReleaseEvent(e)
+
+    def wheelEvent(self, e):
+        if self.word and self._word_pages:
+            self._word_move(1 if e.angleDelta().y() < 0 else -1)
+            return
+        super().wheelEvent(e)
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
@@ -777,6 +908,9 @@ class WireGLWidget(QOpenGLWidget):
     def _step(self, dt):
         if self.market:
             self._market_step(dt)
+            return
+        if self.word:
+            self._word_step(dt)
             return
         if self.deep is not None:
             d = self.deep
@@ -1002,7 +1136,10 @@ class WireGLWidget(QOpenGLWidget):
         if Qt.Key.Key_C in k:
             dy -= 1.0
         m = math.sqrt(dx * dx + dy * dy + dz * dz)
-        if m > 0 and not self._on_any_platform(ignore=0.0, pad_only=False):
+        descending = dy < -0.01
+        if m > 0:
+            if self._on_any_platform() is not None and not descending:
+                self.flying = True          # step off the pad / take a lift
             self.pos[0] += dx / m * spd
             self.pos[1] += dy / m * spd
             self.pos[2] += dz / m * spd
@@ -1020,13 +1157,19 @@ class WireGLWidget(QOpenGLWidget):
             self._peers = self.presence.peers()
             self._online = ok
             self._ghost_line = self.presence.describe()
-        # landing: flying down onto a platform = stepping on it
+        # landing: you only come to rest on a pad when you descend onto it from
+        # above while flying — a single, deliberate touch. Stepping off is always
+        # free, and a pad never grabs you back after you leave its deck.
         w = self.market_world
         if w:
             for a in w["agents"]:
                 x, yy, z = a["pos"]
                 d2 = math.hypot(self.pos[0] - x, self.pos[2] - z)
-                if d2 <= a.get("radius", 4.2) + 1.0 and abs(self.pos[1] - yy) <= 3.4:
+                prev_above = getattr(self, "_land_prev_y", None) is None or \
+                    self._land_prev_y > yy + EYE + 0.2
+                if (self.flying and descending and prev_above
+                        and d2 <= a.get("radius", 4.2) + 1.0
+                        and self.pos[1] <= yy + EYE + 3.4):
                     self.flying = False
                     self.pos[0], self.pos[1], self.pos[2] = x, yy + EYE, z
                     if self.selected_agent != a["id"]:
@@ -1035,6 +1178,7 @@ class WireGLWidget(QOpenGLWidget):
                         self._flash(f"you are standing on {a['name']}'s platform "
                                     f"\u2014 [E] open its trading settings")
                     break
+        self._land_prev_y = self.pos[1]
 
     def _on_any_platform(self, ignore=0.0, pad_only=True):
         w = self.market_world or {}
@@ -1044,6 +1188,192 @@ class WireGLWidget(QOpenGLWidget):
                     and abs(self.pos[1] - yy) <= 3.4:
                 return a
         return None
+
+    # ---- the room of the Word (Learn Islam): scripture on light ------------
+    def _build_word_pages(self):
+        pages = []
+        for s in quran.all_suras():
+            n_ay = len(s["ayahs"])
+            for start in range(0, n_ay, WORD_VERSE_PER_PAGE):
+                pages.append({
+                    "surah": s,
+                    "start": start,
+                    "end": min(start + WORD_VERSE_PER_PAGE, n_ay),
+                    "part": start + 1,
+                })
+        return pages
+
+    def _word_move(self, d):
+        if not self.word or not self._word_pages:
+            return
+        n = len(self._word_pages)
+        self.word_page = (self.word_page + d) % n
+        pg = self._word_pages[self.word_page]
+        s = pg["surah"]
+        title = f"{s['number']} \u00b7 {s['name']} \u2014 {s['translation']}"
+        if n > 1:
+            title = f"{title}  (verses {pg['start'] + 1}\u2013{pg['end']})"
+        self._flash(title)
+        self.update()
+
+    def _enter_word(self):
+        if self.presence is None:
+            self.presence = wiregate.Presence()
+            self.presence.start()
+        self._ghost_line = self.presence.describe()
+        self.word = True
+        self.market = False
+        self.market_world = None
+        self.transition = None
+        self.deep = None
+        self.flying = True
+        self.active = 0
+        self._beat = 0.0
+        self._peers = self.presence.peers() if self.presence else []
+        self._word_pages = self._build_word_pages()
+        self.word_page = 0
+        self.pos = [0.0, WORD_FLOOR_Y + EYE, WORD_R - 11.0]
+        self.yaw = 0.0
+        self.pitch = -0.05
+        s = self._word_pages[0]["surah"]
+        self._flash(f"LEARN ISLAM \u2014 the Qur'an read as a room in the wire "
+                    f"\u00b7 {s['number']} {s['name']} \u00b7 [ ] turn the page "
+                    f"\u00b7 Home leave")
+
+    def _leave_word(self):
+        was = self.word
+        self.word = False
+        self._word_pages = []
+        self.word_page = 0
+        self.selected_agent = None
+        self.selected = None
+        self.flying = False
+        if self.presence is not None:
+            try:
+                self.presence.leave()
+            except Exception:
+                pass
+        self.pos = [-16.0, EYE, 0.0]
+        self.yaw = -math.pi / 2
+        self.pitch = -0.05
+        self.active = 0
+        if was:
+            self._flash("back on the wire \u2014 the room of the Word is still "
+                        "there, whenever you turn back to it")
+
+    def _word_step(self, dt):
+        k = self.keys
+        fast = 2.2 if Qt.Key.Key_Shift in k else 1.0
+        spd = 13.0 * fast * dt
+        cp = math.cos(self.pitch)
+        fx, fy, fz = cp * math.sin(self.yaw), math.sin(self.pitch), -cp * math.cos(self.yaw)
+        rx, rz = math.cos(self.yaw), math.sin(self.yaw)
+        dx = dy = dz = 0.0
+        if Qt.Key.Key_W in k:
+            dx += fx; dy += fy; dz += fz
+        if Qt.Key.Key_S in k:
+            dx -= fx; dy -= fy; dz -= fz
+        if Qt.Key.Key_A in k:
+            dx -= rx; dz -= rz
+        if Qt.Key.Key_D in k:
+            dx += rx; dz += rz
+        if Qt.Key.Key_Space in k:
+            dy += 1.0
+        if Qt.Key.Key_C in k:
+            dy -= 1.0
+        m = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if m > 0:
+            self.pos[0] += dx / m * spd
+            self.pos[1] += dy / m * spd
+            self.pos[2] += dz / m * spd
+        rr = math.hypot(self.pos[0], self.pos[2])
+        if rr > WORD_R - 1.5:
+            self.pos[0] = self.pos[0] / rr * (WORD_R - 1.5)
+            self.pos[2] = self.pos[2] / rr * (WORD_R - 1.5)
+        self.pos[1] = max(WORD_FLOOR_Y + EYE * 0.4,
+                          min(WORD_FLOOR_Y + 64.0, self.pos[1]))
+        self._beat += dt
+        if self.presence and self._beat >= 1.2:
+            self._beat = 0.0
+            ok = self.presence.announce({"x": self.pos[0], "y": self.pos[1],
+                                         "z": self.pos[2]})
+            self._peers = self.presence.peers()
+            self._online = ok
+            self._ghost_line = self.presence.describe()
+
+    def _word_sky(self):
+        glClearColor(0.004, 0.008, 0.013, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        y = WORD_FLOOR_Y
+        glLineWidth(1.0)
+        glColor4f(0.05, 0.09, 0.12, 1.0)
+        glBegin(GL_LINE_LOOP)
+        for i in range(48):
+            a = 2 * math.pi * i / 48
+            glVertex3f((WORD_R - 1.0) * math.cos(a), y + 0.02,
+                       (WORD_R - 1.0) * math.sin(a))
+        glEnd()
+        glLineWidth(1.0)
+
+    def _draw_word(self, t):
+        y = WORD_FLOOR_Y
+        # a calm floor, deep ink, faint concentric rings — quiet enough to read
+        glColor4f(0.014, 0.022, 0.030, 1.0)
+        glBegin(GL_TRIANGLE_FAN)
+        glVertex3f(0, y, 0)
+        for i in range(33):
+            a = 2 * math.pi * i / 32
+            glVertex3f(WORD_R * math.cos(a), y, WORD_R * math.sin(a))
+        glEnd()
+        glLineWidth(1.0)
+        for r in (8, 16, 24):
+            glColor4f(0.05, 0.11, 0.14, 1.0)
+            glBegin(GL_LINE_LOOP)
+            for i in range(40):
+                a = 2 * math.pi * i / 40
+                glVertex3f(r * math.cos(a), y + 0.03, r * math.sin(a))
+            glEnd()
+        glLineWidth(1.0)
+        # the light you read by: a soft column at the centre, no figure on it
+        breathe = 1.0 + 0.10 * math.sin(t * 1.1)
+        self._prism(0, 0, 2.4 * breathe, 0.9, y, y + 16.0, 6,
+                    (0.10, 0.34, 0.40))
+        self._octa(0, y + 9.5, 0, 1.7 * breathe, (0.30, 0.66, 0.72), squash=1.3)
+        glColor4f(0.55, 0.85, 0.90, 0.30)
+        glBegin(GL_LINE_LOOP)
+        for i in range(64):
+            a = 2 * math.pi * i / 64
+            glVertex3f(7.2 * math.cos(a + t * 0.15), y + 0.35,
+                       7.2 * math.sin(a + t * 0.15))
+        glEnd()
+        # other readers, announced over the relay — learning together
+        for p in self._peers:
+            self._draw_peer(p, t)
+        # the gate back to the wire
+        rx, ry, rz = WORD_RETURN_POS
+        self._portal(rx, rz, ry - 0.5, 2.8, (0.52, 0.78, 0.90), t + 0.7)
+        self._portal(rx, rz, ry + 2.0, 1.8, (0.32, 0.56, 0.70), t + 1.6)
+        glLineWidth(1.0)
+
+    def _word_labels(self):
+        out = []
+        vp = glGetIntegerv(GL_VIEWPORT)
+        items = []
+        rx, ry, rz = WORD_RETURN_POS
+        items.append((rx, ry + 2.4, rz, "leave the room of the Word [E] "
+                                       "\u2014 back to the wire", (0.72, 0.92, 1.0)))
+        for p in self._peers:
+            items.append((p["x"], p["y"] + 2.0, p["z"], f"\u25c8 {p['name']}",
+                          self._peer_col(p["name"])))
+        for (x, yy, z, txt, col) in items:
+            try:
+                sx, sy, sz = gluProject(x, yy, z)
+            except Exception:
+                continue
+            if sz < 0 or sz > 1:
+                continue
+            out.append((sx, vp[3] - sy, txt, col))
+        return out
 
     def _peer_col(self, name):
         h = int(hashlib.md5(name.encode()).hexdigest()[:8], 16)
@@ -1284,6 +1614,8 @@ class WireGLWidget(QOpenGLWidget):
     def _nearest(self):
         if self.market:
             return self._nearest_market()
+        if self.word:
+            return self._nearest_word()
         if not self.world or self.deep is not None:
             return None
         px, pz = self.pos[0], self.pos[2]
@@ -1298,6 +1630,7 @@ class WireGLWidget(QOpenGLWidget):
                 consider("gate", g["pos"][0], g["pos"][1], 3.0, domain=g["domain"], count=g["count"])
             consider("heart", 0, -8, 4.5)
             consider("market", MARKET_GATE_POS[0], MARKET_GATE_POS[2], 4.6)
+            consider("word", WORD_GATE_POS[0], WORD_GATE_POS[2], 4.6)
             for s in self._ruin_segments():
                 dx = WALL_R * math.cos(s["angle"])
                 dz = WALL_R * math.sin(s["angle"])
@@ -1327,6 +1660,13 @@ class WireGLWidget(QOpenGLWidget):
         consider("leave_market", rx, rz, ry, 5.0)
         return best
 
+    def _nearest_word(self):
+        rx, rz = WORD_RETURN_POS[0], WORD_RETURN_POS[2]
+        d = math.hypot(self.pos[0] - rx, self.pos[2] - rz)
+        if d <= 5.0:
+            return {"kind": "leave_word", "d": d}
+        return None
+
     def _interact(self):
         n = self._nearest()
         if not n:
@@ -1343,6 +1683,10 @@ class WireGLWidget(QOpenGLWidget):
             elif n["kind"] == "leave_market":
                 self._leave_market()
             return
+        if self.word:
+            if n["kind"] == "leave_word":
+                self._leave_word()
+            return
         if self.flying and n["kind"] in ("gate", "well", "up", "electron", "ruin"):
             self._flash("land first (G) to use the well and the gates")
             return
@@ -1351,6 +1695,8 @@ class WireGLWidget(QOpenGLWidget):
             self._flash(f"following {n['domain']} ×{n['count']}")
         elif n["kind"] == "market":
             self._enter_market()
+        elif n["kind"] == "word":
+            self._enter_word()
         elif n["kind"] == "heart":
             h = self.world["heart"]
             rtt = "?" if h.get("rtt") is None else f"{round(float(h['rtt']), 1)}ms"
@@ -1401,6 +1747,8 @@ class WireGLWidget(QOpenGLWidget):
         p = PAL[key]
         if self.market:
             self._market_sky()
+        elif self.word:
+            self._word_sky()
         else:
             self._sky_and_hills(p)
 
@@ -1422,10 +1770,12 @@ class WireGLWidget(QOpenGLWidget):
             self._glyph_rain(now, spin=sp, dim=1.0)
             self._glyph_rain(now, spin=sp + 1.1, dim=0.62)
             self._deep_motes(now)
-        else:
+        elif not self.word:
             self._glyph_rain(now)
         if self.market:
             self._draw_market(now)
+        elif self.word:
+            self._draw_word(now)
         elif self.world and self.deep is None:
             self._ground(p)
             self._well(now)
@@ -1503,7 +1853,8 @@ class WireGLWidget(QOpenGLWidget):
                     "B rebuild \u00b7 H menu \u00b7 Home leave")
         # fallback control hint when instructions are off
         pr.setPen(QColor(180, 200, 220))
-        pr.drawText(14, h_ - 50, "it is always open \u00b7 step onto a platform to trade")
+        pr.drawText(14, h_ - 50, "it is always open \u00b7 step onto a platform = fly down to it (C) \u00b7 "
+                                 "press any key to step off")
         n0 = self._nearest()
         ccx, ccy = w_ // 2, h_ // 2
         if n0:
@@ -1519,6 +1870,119 @@ class WireGLWidget(QOpenGLWidget):
                 prompt = f"[E] step onto {a['name']}'s platform \u2014 open its trading settings"
             elif n0["kind"] == "leave_market":
                 prompt = "[E] leave the market \u2014 back to the wire"
+            pr.setPen(QColor(255, 215, 120))
+            tw = fm.horizontalAdvance(prompt)
+            pr.drawText((w_ - tw) // 2, ccy + 46, prompt)
+        if self._hud_msg and now < self._hud_until:
+            pr.setPen(QColor(120, 230, 180))
+            tw = fm.horizontalAdvance(self._hud_msg)
+            pr.drawText((w_ - tw) // 2, h_ - 40, self._hud_msg)
+
+    def _hud_word(self, pr: QPainter, now):
+        w_, h_ = self.width(), self.height()
+        mono = QFont("Monospace", 9)
+        pr.setFont(mono)
+        fm = pr.fontMetrics()
+        # ---- header: the room of the Word, and its rule ----
+        pr.setPen(QColor(150, 235, 225))
+        pr.drawText(14, 22, "SECTION 9  //  WIRE VISION  \u2014  LEARN ISLAM")
+        pr.setPen(QColor(105, 165, 175))
+        pr.drawText(14, 36, "the Qur'an, read as a room in the wire \u00b7 nothing is depicted "
+                            "here \u2014 not Allah, not the prophets, not the companions")
+        pr.drawText(14, 50, "only the words, on light \u00b7 others may join you here, "
+                            "for we are all wired")
+        # reader count + ghost layer (top-right)
+        n = len(self._peers)
+        online = self._online or n > 0
+        pr.setPen(QColor(160, 190, 210))
+        msg = (f"relay online \u00b7 {n} other reader{'' if n == 1 else 's'} in the hall"
+               if online else "alone in the hall \u00b7 no other reader on the relay")
+        pr.drawText(w_ - fm.horizontalAdvance(msg) - 14, 22, msg)
+        ghost = self._ghost_line or "ghost layer: open \u00b7 set MRFLUFFY_WIRE_KEY on relay + players"
+        pr.setPen(QColor(160, 190, 210) if "hardened" in ghost else QColor(200, 170, 90))
+        pr.drawText(w_ - fm.horizontalAdvance(ghost[:116]) - 14, 38, ghost[:116])
+        # ---- the reading slab ----
+        if not self._word_pages:
+            return
+        pg = self._word_pages[self.word_page]
+        s = pg["surah"]
+        x0, x1 = int(w_ * 0.09), int(w_ - w_ * 0.09)
+        y0, y1 = 128, h_ - 168
+        pr.fillRect(x0, y0, x1 - x0, y1 - y0, QColor(7, 15, 21, 228))
+        pr.setPen(QColor(38, 84, 96))
+        pr.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+        pr.drawText(x0 + 16, y1 - 10, "THE WORD")
+        pr.setFont(mono)
+        # header line
+        pr.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
+        pr.setPen(QColor(140, 225, 215))
+        title = (f"SURAH {s['number']}  \u00b7  {s['name']}  \u2014  "
+                 f"{s['translation']}   \u00b7   {s['arabic_name']}   "
+                 f"\u00b7   {'MECCAN' if s.get('meccan') else 'MEDINAN'}")
+        pr.drawText(x0 + 16, y0 + 24, title)
+        pr.setFont(mono)
+        # about + page marker
+        pr.setPen(QColor(140, 165, 175))
+        part = f"verses {pg['start'] + 1}\u2013{pg['end']} of {len(s['ayahs'])}"
+        pr.drawText(x0 + 16, y0 + 44, f"{part}   \u00b7   {s['about']}")
+        # the verses themselves
+        yy = y0 + 72
+        ar_f = QFont("Sans Serif", 17)
+        tr_f = QFont("Monospace", 12)
+        tr_f.setItalic(True)
+        en_f = QFont("Serif", 15)
+        for a in s["ayahs"][pg["start"]:pg["end"]]:
+            if yy > y1 - 4:
+                break
+            ar_r = QRect(x0 + 16, yy, x1 - x0 - 32, 30)
+            pr.setFont(ar_f)
+            pr.setPen(QColor(230, 236, 240))
+            pr.drawText(ar_r, int(Qt.AlignmentFlag.AlignRight)
+                        | int(Qt.AlignmentFlag.AlignTop), a["ar"])
+            pr.setFont(QFont("Monospace", 11))
+            pr.setPen(QColor(120, 235, 160))
+            pr.drawText(ar_r, int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignTop),
+                        f"({a['n']})")
+            yy += 30
+            pr.setFont(tr_f)
+            pr.setPen(QColor(150, 175, 185))
+            pr.drawText(QRect(x0 + 16, yy, x1 - x0 - 32, 20),
+                        int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignTop),
+                        a["tr"])
+            yy += 21
+            pr.setFont(en_f)
+            pr.setPen(QColor(215, 225, 230))
+            pr.drawText(QRect(x0 + 16, yy, x1 - x0 - 32, 40),
+                        int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignTop),
+                        a["en"])
+            yy += 42
+        pr.setFont(mono)
+        # footer: honesty + controls
+        pr.setPen(QColor(130, 165, 175))
+        pr.drawText(14, h_ - 118,
+                    "faithful local copy of a published mushaf \u2014 quran-uthmani (Hafs) "
+                    "\u00b7 en.sahih (Saheeh International), via alquran.cloud")
+        pr.setPen(QColor(120, 190, 180))
+        pr.drawText(14, h_ - 102,
+                    "a translation opens a door; it is not the Book \u2014 the Arabic "
+                    "is the Qur'an. Seek a teacher, and the tafsir, for understanding.")
+        pr.setPen(QColor(140, 175, 190))
+        pr.drawText(14, h_ - 66,
+                    "WASD fly \u00b7 Space/C up/down \u00b7 [ ] page "
+                    "\u00b7 scroll page \u00b7 E leave (far gate) \u00b7 Home floor")
+        pr.setPen(QColor(180, 200, 220))
+        pr.drawText(14, h_ - 50,
+                    f"page {self.word_page + 1}/{len(self._word_pages)} \u00b7 "
+                    f"surah {s['number']} \u00b7 {s['name']}")
+        # reticle + prompt at the leave gate
+        n0 = self._nearest()
+        ccx, ccy = w_ // 2, h_ // 2
+        pr.setPen(QPen(QColor(255, 185, 40, 235) if n0 else QColor(120, 230, 180, 190), 2))
+        for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+            pr.drawLine(ccx + dx * 18, ccy + dy * 18, ccx + dx * 18 + dx * 12, ccy + dy * 18)
+            pr.drawLine(ccx + dx * 18, ccy + dy * 18, ccx + dx * 18, ccy + dy * 18 + dy * 12)
+        if n0 and n0["kind"] == "leave_word":
+            prompt = "[E] leave the room of the Word \u2014 back to the wire"
             pr.setPen(QColor(255, 215, 120))
             tw = fm.horizontalAdvance(prompt)
             pr.drawText((w_ - tw) // 2, ccy + 46, prompt)
@@ -1546,6 +2010,11 @@ class WireGLWidget(QOpenGLWidget):
         # ---- the market: blackhorse, reached through the gate on the wire ----
         if self.market:
             self._hud_market(pr, now)
+            return
+
+        # ---- the room of the Word: Learn Islam, scripture on light ----
+        if self.word:
+            self._hud_word(pr, now)
             return
 
         # ---- the open sea below the edge: unbounded, honest, carrying no data ----
@@ -1654,6 +2123,10 @@ class WireGLWidget(QOpenGLWidget):
         if n:
             if n["kind"] == "gate":
                 prompt = f"[E] follow {n['domain']} ×{n['count']} down the stack"
+            elif n["kind"] == "market":
+                prompt = "[E] enter the market (Blackhorse)"
+            elif n["kind"] == "word":
+                prompt = "[E] enter the room of the Word \u2014 Learn Islam"
             elif n["kind"] == "heart":
                 prompt = "[E] read the heart (your host)"
             elif n["kind"] == "ruin":

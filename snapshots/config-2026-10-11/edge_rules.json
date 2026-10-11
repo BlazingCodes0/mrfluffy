@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "every_minutes": 15,
+  "last_ts": null,
+  "timeout_seconds": 120
+}
