@@ -99,10 +99,14 @@ near it the world makes real DNS lookups and real HTTP/HTTPS requests (via
 came back: status, milliseconds, the resolved IP, the bytes. `E` steps through the
 gate into **the Exchange** — a hall, past the edge, whose ring holds gates that
 each lead to a real service out on the net. There is one gate there for now, and
-it is **DuckDuckGo**: step into it, type a search, and the gate really asks
-DuckDuckGo's lite endpoint; the real titles, URLs and snippets come back and are
-served inside the hall, and pressing a number reads a real page's text in the
-same place. More gates will hang on the ring later. If `MRFLUFFY_GATE_URL` names a
+it is **DuckDuckGo**: stand at its console, type a search, and the gate really
+asks DuckDuckGo's lite endpoint. You do not get a browser — you get **the packet
+theatre**: every real phase of the request (DNS, TCP, TLS, the request, the
+response) crosses the hall as a stream of packet motes with its real milliseconds
+and bytes logged in an in-world ledger; each result hangs as a **tablet** on the
+ring, and you **fly to one and press `E`** to reach it, where the page's real text
+assembles on a slab of light. More gates will hang on the ring later. If
+`MRFLUFFY_GATE_URL` names a
 relay, stepping through the outer gate first joins it (so the market crowd becomes
 real other users). The neutral reachability target is `MRFLUFFY_NET_HOST`; private
 / loopback addresses are refused unless `MRFLUFFY_NET_ALLOW_PRIVATE=1`. Every

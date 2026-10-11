@@ -351,21 +351,58 @@ travel through or exit back to the chapters."*
   shows ~40 KB of real text; hall / terminal / reader all render without exceptions,
   and market / word / deep still render.
 
+### 15. The packet theatre — the web seen as it truly goes (2026-10-11)
+
+- **Not a browser; a place.** The Exchange's gate no longer opens a terminal-with-a-
+  results-list. Standing at a gate's **console** you type a search; the search is
+  performed for real and then its **every measured phase flies across the hall as a
+  stream of packet motes** — DNS query → DNS answer → SYN → SYN/ACK → ACK → TLS
+  hello → request → `200`. Results are no longer a numbered list: each hangs as a
+  **tablet** on the hall's ring, and you **fly to one and press `E`** to reach it.
+- **Real, measured phases.** `wirenet.trace()` (new) is a raw-socket request that
+  times each real phase and counts its real bytes: `dns` (host, ip, answers), `tcp`
+  (ip, port), `tls` (version, cipher), `request` (method, path, bytes), `response`
+  (status, bytes). `duckduckgo()` and the new `Net` `read` job both go through it, so
+  search and page-read alike return a `phases` list. `_load_phases` turns those into
+  the packet stream; the motes carry no invented number — every ms and byte on screen
+  was measured on the wire.
+- **The packet ledger.** A live in-world panel lists each phase as it lands: `dns
+  query · host`, `tcp connect · ip:port`, `handshake · N ms`, `tls … · N ms`, `POST
+  /lite/ · Nb`, `response · http 200 · N ms · Nb`, plus the far service's host and IP.
+- **Text on light, not a window.** Opening a tablet reaches the page for real and its
+  packets cross the hall; the page's readable text (markup/scripts stripped by
+  `_web_extract`) **assembles on a slab of light** (`_hud_mono`) — no browser chrome.
+- **Typing by proximity, flying to explore.** You type only while within
+  `EXCHANGE_CONSOLE_R` of the console (`_at_console`); step/fly away and `WASD`
+  returns, so you roam among the tablets. `1–9/0` open a tablet by number, `[`/`]`
+  turn DuckDuckGo result pages, `Esc` closes the page then the gate, `Home` leaves.
+- **In the world.** `_draw_packets` draws the console → far-service link, the far
+  service as a monolith of light on the ring's edge, and each mote at the place it
+  truly is along the wire. `_place_tablets` hangs up to 10 result-tablets on the ring
+  and names them by projection (`_hud_tablets`).
+- Verified headless (xvfb/llvmpipe): enter hall → open `ddg` → search `linux kernel`
+  → 11 results, 10 tablets, 9 phase-events → 6 ledger rows with real timings (e.g.
+  `tls TLSv1.3 · AES-256-GCM · 110.7 ms`, `response · http 200 · 685.2 ms · 27328b`);
+  fly to a tablet + `E` → real `200 · 630ms · 19592b` page (1689 chars) with its own
+  packet replay; offscreen paint exercises the tablet-label projection. Market / word /
+  deep untouched.
+
 ## Current state (end of 2026-10-11)
 
 - `wiregame.py` modified for the ayah engine (word room), again for full screen +
   the star-cluster chapter sky, again for the whole-Qur'an cluster, the
   full-screen exit overlay, and the quick-travel bar, again for the
   reading/scroll fixes, again to scatter the chapters wide, again for the
-  outward gate, and again for the Exchange + its DuckDuckGo gate; `app.py`
+  outward gate, again for the Exchange + its DuckDuckGo gate, and again for the
+  packet theatre (section 15); `app.py`
   modified for full-screen chrome hiding; `quranworld.py`
   new; `quran.py` rewritten to open the data; `quran_data.json` (all 114 surahs)
   and `fetch_quran.py` new; **`wirenet.py` new** (the real dialer, now with
-  form-POST + a DuckDuckGo search job).
+  form-POST, a DuckDuckGo search job, and the phase-timing `trace()`).
   `AGENTS.md` + `SNAPSHOT.md` updated with these sections.
-- Committed `7029213` (scatter the chapters wide), snapshot `~/fakegit/mrfluffyv1.10`
-  = `7029213`. The outward-gate + `wirenet.py` work (section 13) and the Exchange +
-  DuckDuckGo work (section 14) are uncommitted on top.
+- Committed `9a4c9b1` (build the Exchange + DuckDuckGo), snapshot
+  `~/fakegit/mrfluffyv1.11` = `9a4c9b1`; `7029213` = v1.10. The packet-theatre work
+  (section 15) is on top.
 - Open threads: (a) more gates on the Exchange ring (the hall is built for a
   crowd of services — a search is the first); (b) make the amber reticle
   lock/label the nearest real object in 3D; (c) polish the market further (crowd

@@ -161,6 +161,128 @@ def fetch(url: str, max_bytes: int = MAX_BYTES, timeout: float = DEFAULT_TIMEOUT
                 "error": f"{type(e).__name__}: {e}"}
 
 
+def _dechunk(b: bytes) -> bytes:
+    out = bytearray()
+    i = 0
+    while i < len(b):
+        j = b.find(b"\r\n", i)
+        if j < 0:
+            break
+        try:
+            size = int(b[i:j].split(b";")[0], 16)
+        except ValueError:
+            break
+        if size == 0:
+            break
+        start = j + 2
+        out += b[start:start + size]
+        i = start + size + 2
+    return bytes(out)
+
+
+def trace(url: str, data: dict | None = None, max_bytes: int = MAX_BYTES,
+          timeout: float = DEFAULT_TIMEOUT) -> dict:
+    """Do the request one REAL phase at a time over a plain socket — DNS, TCP
+    connect, TLS handshake, the request, the response — timing each and counting
+    the bytes. This is the true sequence the packet theatre animates; every field
+    is measured, never invented."""
+    t_start = time.perf_counter()
+    phases: list = []
+    sock = None
+    try:
+        scheme, host, port, path = _norm(url)
+        def mark(name, ms, **kw):
+            phases.append({"phase": name, "ms": round(ms, 2), **kw})
+        # --- DNS ---
+        t = time.perf_counter()
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        ip = infos[0][4][0]
+        mark("dns", (time.perf_counter() - t) * 1000.0, host=host, ip=ip, answers=len(infos))
+        _refuse_if_private([i[4][0] for i in infos])
+        # --- TCP connect ---
+        t = time.perf_counter()
+        sock = socket.create_connection((ip, port), timeout=timeout)
+        mark("tcp", (time.perf_counter() - t) * 1000.0, ip=ip, port=port)
+        # --- TLS handshake ---
+        if scheme == "https":
+            t = time.perf_counter()
+            ctx = ssl.create_default_context()
+            sock = ctx.wrap_socket(sock, server_hostname=host)
+            mark("tls", (time.perf_counter() - t) * 1000.0,
+                 version=sock.version(), cipher=(sock.cipher() or ["?"])[0])
+        # --- request ---
+        body = urlencode(data).encode() if data else b""
+        method = "POST" if data is not None else "GET"
+        head = (f"{method} {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {UA}\r\n"
+                f"Accept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n")
+        if data is not None:
+            head += ("Content-Type: application/x-www-form-urlencoded\r\n"
+                     f"Content-Length: {len(body)}\r\n")
+        head += "\r\n"
+        t = time.perf_counter()
+        sock.sendall(head.encode() + body)
+        mark("request", (time.perf_counter() - t) * 1000.0,
+             method=method, path=path, bytes=len(head) + len(body))
+        # --- response ---
+        t = time.perf_counter()
+        chunks, got = [], 0
+        while got <= max_bytes:
+            b = sock.recv(65536)
+            if not b:
+                break
+            chunks.append(b)
+            got += len(b)
+        raw = b"".join(chunks)
+        head_bytes, _, rest = raw.partition(b"\r\n\r\n")
+        status = 0
+        lines = head_bytes.split(b"\r\n")
+        headers: dict = {}
+        if lines and lines[0].startswith(b"HTTP/"):
+            try:
+                status = int(lines[0].split(b" ")[1])
+            except (IndexError, ValueError):
+                pass
+        for ln in lines[1:]:
+            if b":" in ln:
+                k, v = ln.split(b":", 1)
+                headers[k.decode("latin1").strip().lower()] = v.decode("latin1").strip()
+        payload = rest
+        if "chunked" in headers.get("transfer-encoding", "").lower():
+            payload = _dechunk(payload)
+        enc = headers.get("content-encoding", "").lower()
+        try:
+            if "gzip" in enc:
+                payload = gzip.decompress(payload)
+            elif "deflate" in enc:
+                payload = zlib.decompress(payload)
+        except Exception:
+            pass
+        mark("response", (time.perf_counter() - t) * 1000.0, status=status, bytes=len(raw))
+        ctype = headers.get("content-type", "")
+        charset = "utf-8"
+        if "charset=" in ctype.lower():
+            charset = ctype.lower().split("charset=", 1)[1].split(";")[0].strip()
+        try:
+            text = payload.decode(charset, "replace")
+        except LookupError:
+            text = payload.decode("utf-8", "replace")
+        return {"ok": True, "url": f"{scheme}://{host}:{port}{path}", "scheme": scheme,
+                "host": host, "ip": ip, "port": port, "status": status,
+                "ms": round((time.perf_counter() - t_start) * 1000.0, 1),
+                "bytes": len(raw), "content_type": ctype,
+                "server": headers.get("server", ""), "text": text[:max_bytes],
+                "phases": phases, "headers": headers}
+    except Exception as e:
+        return {"ok": False, "url": url, "error": f"{type(e).__name__}: {e}",
+                "phases": phases}
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
 def whoami() -> dict:
     """Our real public address, asked of Cloudflare's trace endpoint — nothing
     inferred, nothing invented. Only ever called when someone asks."""
@@ -209,24 +331,45 @@ def _parse_ddg(text: str) -> list:
     return out[:20]
 
 
-def duckduckgo(query: str, timeout: float = DEFAULT_TIMEOUT) -> dict:
+def _parse_next(text: str):
+    i = text.find("next_form")
+    if i < 0:
+        return None
+    i = text.rfind("<form", 0, i)
+    j = text.find("</form>", i)
+    if i < 0 or j < 0:
+        return None
+    form = text[i:j]
+    if "Next Page" not in form:
+        return None
+    fields = dict(re.findall(r'name="([^"]+)"\s+value="([^"]*)"', form))
+    return fields or None
+
+
+def duckduckgo(query: str, data: dict | None = None, timeout: float = DEFAULT_TIMEOUT) -> dict:
     """A real DuckDuckGo search via the lite endpoint (POST, no JS, no browser).
-    Returns the results as they came — real titles, URLs and snippets. DDG now
-    and then answers with an empty challenge page; we simply ask again once."""
-    q = (query or "").strip()
-    if not q:
-        return {"ok": False, "error": "empty query", "results": []}
-    last = {"ok": False, "error": "no answer", "results": []}
+    Pass the returned 'next' fields back as data to page on; returns the results
+    as they came — real titles, URLs and snippets. DDG now and then answers with
+    an empty challenge page; we simply ask again once."""
+    if data is None:
+        q = (query or "").strip()
+        if not q:
+            return {"ok": False, "error": "empty query", "results": [], "next": None}
+        data = {"q": q, "kl": "us-en"}
+    q = data.get("q", query or "")
+    last = {"ok": False, "error": "no answer", "results": [], "next": None}
     for attempt in range(2):
-        r = fetch("https://lite.duckduckgo.com/lite/", data={"q": q, "kl": "us-en"},
+        r = trace("https://lite.duckduckgo.com/lite/", data=data,
                   max_bytes=262144, timeout=timeout)
         if not r.get("ok"):
-            last = {**r, "results": []}
+            last = {**r, "results": [], "next": None}
         else:
-            results = _parse_ddg(r.get("text", ""))
+            text = r.get("text", "")
+            results = _parse_ddg(text)
             last = {"ok": True, "engine": "duckduckgo", "query": q, "url": r["url"],
                     "ip": r.get("ip"), "ms": r.get("ms"), "status": r.get("status"),
-                    "results": results}
+                    "bytes": r.get("bytes"), "phases": r.get("phases", []),
+                    "results": results, "next": _parse_next(text)}
             if results:
                 return last
         if attempt == 0:
@@ -292,7 +435,10 @@ class Net:
                                            if k in ("max_bytes", "timeout", "method", "data")})
                 elif kind == "search":
                     res = duckduckgo(target, **{k: v for k, v in kw.items()
-                                                if k in ("timeout",)})
+                                                if k in ("timeout", "data")})
+                elif kind == "read":
+                    res = trace(target, **{k: v for k, v in kw.items()
+                                           if k in ("max_bytes", "timeout", "data")})
                 elif kind == "whoami":
                     res = whoami()
                 else:

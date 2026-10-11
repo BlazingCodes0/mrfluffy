@@ -79,6 +79,9 @@ EXCHANGE_FLOOR_Y = -132.0
 EXCHANGE_R = 30.0
 EXCHANGE_GATE_R = 17.0        # the ring the service gates hang on
 EXCHANGE_RETURN_POS = [0.0, EXCHANGE_FLOOR_Y + 6.0, EXCHANGE_R - 7.0]
+EXCHANGE_CONSOLE_R = 6.5      # near a gate's console you type; away from it you fly
+EXCHANGE_SERVER_R = 26.0      # where the far service hangs, out on the ring's edge
+EXCHANGE_TABLET_R = 21.5      # where a search's result-tablets hang
 EXCHANGE_GATES = (
     {"id": "ddg", "name": "DuckDuckGo", "angle": -math.pi * 0.5,
      "host": "lite.duckduckgo.com",
@@ -249,6 +252,19 @@ class WireGLWidget(QOpenGLWidget):
         self.web_page = None             # {title, url, lines} a served page
         self.web_scroll = 0
         self._web_caret = 0.0
+        self.web_hist = []               # result pages we came from
+        self.web_data = None             # the form fields of the current page
+        self.web_next = None             # the fields that fetch the next page
+        # the packet theatre: real phases, played as motes across the hall
+        self.service_angle = 0.0         # where the live gate hangs on the ring
+        self.web_net = None              # {host, ip, port} of the far service
+        self.pkt = []                    # motes in flight
+        self.pkt_rows = []               # the packet ledger (real ms/bytes)
+        self._pkt_q = []                 # queued phase events
+        self._pkt_i = 0
+        self._pkt_t = 0.0
+        self.web_tabs = []               # result-tablets you fly to
+        self.web_mono = None             # the page, assembled as light
         self._last_t = time.time()
         self._hud_msg = ""
         self._hud_until = 0.0
@@ -323,6 +339,18 @@ class WireGLWidget(QOpenGLWidget):
         self.web_status = ""
         self.web_page = None
         self.web_scroll = 0
+        self.web_hist = []
+        self.web_data = None
+        self.web_next = None
+        self.service_angle = 0.0
+        self.web_net = None
+        self.pkt = []
+        self.pkt_rows = []
+        self._pkt_q = []
+        self._pkt_i = 0
+        self._pkt_t = 0.0
+        self.web_tabs = []
+        self.web_mono = None
         self.pos = [0.0, EYE, 10.0]
         self.yaw = 0.0
         self.pitch = -0.05
@@ -984,8 +1012,13 @@ class WireGLWidget(QOpenGLWidget):
     def keyPressEvent(self, e):
         k = e.key()
         if self.service is not None:
-            self._web_key(e)
-            return
+            if (k in (Qt.Key.Key_Escape, Qt.Key.Key_Home,
+                      Qt.Key.Key_BracketLeft, Qt.Key.Key_BracketRight,
+                      Qt.Key.Key_PageUp, Qt.Key.Key_PageDown)
+                    or Qt.Key.Key_0 <= k <= Qt.Key.Key_9
+                    or self.web_mono is not None or self._at_console()):
+                self._web_key(e)
+                return
         if k == Qt.Key.Key_Escape:
             self._drag = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -1070,8 +1103,9 @@ class WireGLWidget(QOpenGLWidget):
     def _step(self, dt):
         self._net_tick()
         if self.exchange:
-            if self.service is None:
+            if self.service is None or not self._at_console():
                 self._exchange_step(dt)
+            self._packet_step(dt)
             self._web_tick()
             return
         if self.market:
@@ -2262,7 +2296,9 @@ class WireGLWidget(QOpenGLWidget):
                 self._leave_word()
             return
         if self.exchange:
-            if n["kind"] == "service":
+            if n["kind"] == "web_tablet":
+                self._web_open_tablet(n["index"])
+            elif n["kind"] == "service":
                 self._open_service(n["gate"]["id"])
             elif n["kind"] == "leave_exchange":
                 self._leave_exchange()
@@ -2391,6 +2427,13 @@ class WireGLWidget(QOpenGLWidget):
         self.selected_agent = None
         self.selected = None
         self.service = None
+        self.web_tabs = []
+        self.web_mono = None
+        self.pkt = []
+        self.pkt_rows = []
+        self._pkt_q = []
+        self._pkt_i = 0
+        self.web_net = None
         self.flying = True
         self.active = 0
         self.pos = [0.0, EXCHANGE_FLOOR_Y + EYE, 14.0]
@@ -2409,6 +2452,16 @@ class WireGLWidget(QOpenGLWidget):
         self.web_query = ""
         self.web_scroll = 0
         self.web_job = None
+        self.web_hist = []
+        self.web_data = None
+        self.web_next = None
+        self.web_net = None
+        self.pkt = []
+        self.pkt_rows = []
+        self._pkt_q = []
+        self._pkt_i = 0
+        self.web_tabs = []
+        self.web_mono = None
         self.flying = False
         self.pos = [NET_GATE_X, EYE, NET_GATE_Z - 2.0]
         self.yaw = NET_ANGLE
@@ -2507,6 +2560,9 @@ class WireGLWidget(QOpenGLWidget):
         glVertex3f(rx - rr * 0.7, y + 7.6, rz)
         glEnd()
         self._portal(rx, rz, y + 1.4, 2.6, (0.95, 0.72, 0.25), t)
+        # the live link to the far service, and its packets, when a gate is open
+        if self.service is not None:
+            self._draw_packets(t)
 
     def _draw_exchange_gate(self, g, t):
         x, z = self._exchange_gate_xz(g["angle"])
@@ -2550,6 +2606,9 @@ class WireGLWidget(QOpenGLWidget):
         for g in EXCHANGE_GATES:
             x, z = self._exchange_gate_xz(g["angle"])
             consider("service", x, z, 6.0, gate=g)
+        if self.service is not None:
+            for i, tab in enumerate(self.web_tabs):
+                consider("web_tablet", tab["x"], tab["z"], 5.5, index=i)
         consider("leave_exchange", EXCHANGE_RETURN_POS[0], EXCHANGE_RETURN_POS[2], 5.5)
         return best
 
@@ -2559,16 +2618,34 @@ class WireGLWidget(QOpenGLWidget):
         if g is None:
             return
         self.service = gid
+        self.service_angle = g["angle"]
         self.web_query = ""
         self.web_results = []
         self.web_answer = None
         self.web_page = None
         self.web_scroll = 0
         self.web_job = None
+        self.web_hist = []
+        self.web_data = None
+        self.web_next = None
+        self.web_net = None
+        self.pkt = []
+        self.pkt_rows = []
+        self._pkt_q = []
+        self._pkt_i = 0
+        self.web_tabs = []
+        self.web_mono = None
         self.web_status = f"{g['name']} \u2014 type a search and press Enter"
+        # stand before the console, looking out along the wire to the far service
+        a = g["angle"]
+        r0 = EXCHANGE_GATE_R - 4.5
+        self.pos = [r0 * math.cos(a), EXCHANGE_FLOOR_Y + EYE, r0 * math.sin(a)]
+        self.yaw = a + math.pi / 2
+        self.pitch = -0.05
+        self.flying = True
         if self.net is None:
             self.net = wirenet.Net()
-        self._flash(f"you step into {g['name']} \u2014 the gate is live")
+        self._flash(f"you step into {g['name']} \u2014 watch the packets leave the console")
         self.web_changed.emit()
 
     def _close_service(self):
@@ -2577,28 +2654,47 @@ class WireGLWidget(QOpenGLWidget):
         self.web_results = []
         self.web_query = ""
         self.web_scroll = 0
+        self.web_hist = []
+        self.web_data = None
+        self.web_next = None
+        self.web_net = None
+        self.pkt = []
+        self.pkt_rows = []
+        self._pkt_q = []
+        self._pkt_i = 0
+        self.web_tabs = []
+        self.web_mono = None
+        a = self.service_angle
+        self.pos = [(EXCHANGE_GATE_R + 4.0) * math.cos(a), EXCHANGE_FLOOR_Y + EYE,
+                    (EXCHANGE_GATE_R + 4.0) * math.sin(a)]
         self.web_changed.emit()
 
     def _web_key(self, e):
-        """Keys while a gate is open. Returns True when the key is ours."""
+        """Keys at a gate's console. Typing happens only while you stand at it."""
         k = e.key()
         if k == Qt.Key.Key_Escape:
-            if self.web_page is not None:
-                self.web_page = None
-                self.web_scroll = 0
+            if self.web_mono is not None:
+                self.web_mono = None
+                self.web_changed.emit()
             else:
                 self._close_service()
             return True
         if k == Qt.Key.Key_Home:
             self._leave_exchange()
             return True
-        if self.web_page is not None:                       # reading a real page
+        if self.web_mono is not None:                       # reading a real page
             if k in (Qt.Key.Key_BracketLeft, Qt.Key.Key_PageUp, Qt.Key.Key_Up):
-                self.web_scroll = max(0, self.web_scroll - 70)
+                self.web_mono["scroll"] = max(0, self.web_mono["scroll"] - 70)
             elif k in (Qt.Key.Key_BracketRight, Qt.Key.Key_PageDown, Qt.Key.Key_Down):
-                self.web_scroll += 70
+                self.web_mono["scroll"] += 70
             elif k == Qt.Key.Key_End:
-                self.web_scroll += 100000
+                self.web_mono["scroll"] += 100000
+            return True
+        if k in (Qt.Key.Key_BracketLeft, Qt.Key.Key_PageUp):   # turn result pages
+            self._web_more(-1)
+            return True
+        if k in (Qt.Key.Key_BracketRight, Qt.Key.Key_PageDown):
+            self._web_more(1)
             return True
         if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):      # the search terminal
             self._web_search()
@@ -2622,20 +2718,64 @@ class WireGLWidget(QOpenGLWidget):
         if self.net is None:
             self.net = wirenet.Net()
         self.web_results = []
-        self.web_page = None
+        self.web_mono = None
+        self.web_tabs = []
+        self.pkt = []
+        self.pkt_rows = []
+        self._pkt_q = []
+        self._pkt_i = 0
+        self.web_hist = []
+        self.web_next = None
+        self.web_data = {"q": q, "kl": "us-en"}
         self.web_status = f"asking DuckDuckGo for \u201c{q}\u201d\u2026"
-        self.web_job = self.net.ask("search", q)
+        self.web_job = self.net.ask("search", q, data=self.web_data)
+
+    def _web_more(self, direction):
+        """Turn to the next page of real results — or back to the one before."""
+        if direction > 0:
+            if not self.web_next:
+                self.web_status = "no further results from DuckDuckGo"
+                return
+            self.web_hist.append(self.web_data)
+            self.web_data = self.web_next
+        else:
+            if not self.web_hist:
+                self.web_status = "that is the first page"
+                return
+            self.web_data = self.web_hist.pop()
+        self.web_results = []
+        self.web_mono = None
+        self.web_tabs = []
+        self.pkt = []
+        self.pkt_rows = []
+        self._pkt_q = []
+        self._pkt_i = 0
+        self.web_status = "next page\u2026" if direction > 0 else "back a page\u2026"
+        if self.net is None:
+            self.net = wirenet.Net()
+        self.web_job = self.net.ask("search", "", data=self.web_data)
 
     def _web_open_result(self, i):
         if i < 0 or i >= len(self.web_results):
             return
-        hit = self.web_results[i]
+        self._web_read(self.web_results[i])
+
+    def _web_open_tablet(self, i):
+        if 0 <= i < len(self.web_results):
+            self._web_read(self.web_results[i])
+
+    def _web_read(self, hit):
+        """Reach out for one real page — the packets will cross the hall."""
         if self.net is None:
             self.net = wirenet.Net()
-        self.web_page = {"title": hit["title"], "url": hit["url"], "lines": None,
-                         "status": "fetching\u2026"}
-        self.web_scroll = 0
-        self.web_job = self.net.ask("fetch", hit["url"], max_bytes=400000, timeout=10)
+        self.web_mono = {"title": hit["title"], "url": hit["url"], "lines": None,
+                         "status": "reaching\u2026", "scroll": 0}
+        self.pkt = []
+        self.pkt_rows = []
+        self._pkt_q = []
+        self._pkt_i = 0
+        self.web_job = self.net.ask("read", hit["url"], max_bytes=400000, timeout=10)
+        self.web_changed.emit()
 
     def _web_tick(self):
         """Collect the real answer the worker brought back — search or page."""
@@ -2650,24 +2790,174 @@ class WireGLWidget(QOpenGLWidget):
             if got.get("ok"):
                 res = got.get("results", [])
                 self.web_results = res
+                self.web_next = got.get("next")
+                self._place_tablets(res)
+                self._load_phases(got.get("phases", []))
+                self.web_net = {"host": (got.get("url") or "").split("//")[-1].split("/")[0],
+                                "ip": got.get("ip")}
                 n = len(res)
+                page = len(self.web_hist) + 1
                 self.web_status = (
-                    f"duckduckgo \u00b7 {n} result{'' if n == 1 else 's'} \u00b7 "
-                    f"{got.get('ms', 0):.0f}ms \u00b7 {got.get('ip')}"
-                    if n else "duckduckgo answered, but came back with no results")
+                    f"duckduckgo \u00b7 page {page} \u00b7 {n} result{'' if n == 1 else 's'} \u00b7 "
+                    f"{got.get('ms', 0):.0f}ms \u00b7 {got.get('ip')} \u2014 fly to a tablet and press E"
+                    if n else f"duckduckgo \u00b7 page {page} \u00b7 no results here")
             else:
                 self.web_results = []
+                self.web_next = None
                 self.web_status = f"no answer: {got.get('error')}"
-        elif got.get("kind") == "fetch" and self.web_page is not None:
+        elif got.get("kind") == "read" and self.web_mono is not None:
             if got.get("ok"):
                 text = self._web_extract(got.get("text", ""))
-                self.web_page["lines"] = text or "(this page served no readable text \u2014 it may be script-only)"
-                self.web_page["status"] = (f"{got.get('status')} \u00b7 "
+                self.web_mono["lines"] = text or "(this page served no readable text \u2014 it may be script-only)"
+                self.web_mono["status"] = (f"{got.get('status')} \u00b7 "
                                            f"{got.get('ms', 0):.0f}ms \u00b7 "
                                            f"{got.get('bytes')}b \u00b7 {got.get('ip')}")
+                self._load_phases(got.get("phases", []))
+                self.web_net = {"host": (got.get("url") or "").split("//")[-1].split("/")[0],
+                                "ip": got.get("ip")}
             else:
-                self.web_page["lines"] = f"(could not read it: {got.get('error')})"
-                self.web_page["status"] = "no answer"
+                self.web_mono["lines"] = f"(could not read it: {got.get('error')})"
+                self.web_mono["status"] = "no answer"
+            self.web_changed.emit()
+
+    # ---- the packet theatre -------------------------------------------------
+    def _service_geom(self):
+        """Where the console stands and where the far service hangs, in the hall."""
+        a = self.service_angle
+        cx = EXCHANGE_GATE_R * math.cos(a)
+        cz = EXCHANGE_GATE_R * math.sin(a)
+        sx = EXCHANGE_SERVER_R * math.cos(a)
+        sz = EXCHANGE_SERVER_R * math.sin(a)
+        y = EXCHANGE_FLOOR_Y
+        return (cx, y + 3.2, cz), (sx, y + 9.0, sz)
+
+    def _at_console(self):
+        if self.service is None:
+            return True
+        a = self.service_angle
+        cx = EXCHANGE_GATE_R * math.cos(a)
+        cz = EXCHANGE_GATE_R * math.sin(a)
+        return math.hypot(self.pos[0] - cx, self.pos[2] - cz) <= EXCHANGE_CONSOLE_R
+
+    def _place_tablets(self, results):
+        """Hang each result as a tablet on the ring of the hall, yours to fly to."""
+        self.web_tabs = []
+        a0 = self.service_angle
+        for i, hit in enumerate(results[:10]):
+            col = i % 5
+            row = i // 5
+            a = a0 + (col - 2) * 0.30
+            r = EXCHANGE_TABLET_R + row * 5.0
+            x, z = r * math.cos(a), r * math.sin(a)
+            self.web_tabs.append({"index": i, "angle": a, "x": x, "z": z,
+                                  "title": hit.get("title", ""), "url": hit.get("url", ""),
+                                  "col": (0.35, 0.85, 1.0)})
+
+    def _load_phases(self, phases):
+        """Turn the real, measured phases into a stream of packets to fly."""
+        q = []
+        for ph in phases or []:
+            nm = ph.get("phase")
+            ms = ph.get("ms", 0.0)
+            by = ph.get("bytes", 0)
+            if nm == "dns":
+                q.append({"dir": "out", "label": "DNS " + str(ph.get("host", "")),
+                          "col": (0.40, 0.62, 1.0), "burst": 1,
+                          "row": f"dns query \u00b7 {ph.get('host','')}",
+                          "rcol": (0.55, 0.72, 1.0)})
+                q.append({"dir": "back", "label": "DNS \u2192 " + str(ph.get("ip", "")),
+                          "col": (0.55, 0.92, 1.0), "burst": 1, "row": "",
+                          "rcol": (0.55, 0.92, 1.0)})
+            elif nm == "tcp":
+                q.append({"dir": "out", "label": "SYN", "col": (1.0, 0.85, 0.35), "burst": 1,
+                          "row": f"tcp connect \u00b7 {ph.get('ip','')}:{ph.get('port','')}",
+                          "rcol": (1.0, 0.85, 0.45)})
+                q.append({"dir": "back", "label": "SYN/ACK", "col": (1.0, 0.92, 0.55), "burst": 1,
+                          "row": f"  handshake \u00b7 {ms:.1f} ms", "rcol": (0.8, 0.8, 0.6)})
+                q.append({"dir": "out", "label": "ACK", "col": (1.0, 0.85, 0.35), "burst": 1,
+                          "row": "", "rcol": (1.0, 0.85, 0.45)})
+            elif nm == "tls":
+                q.append({"dir": "out", "label": "ClientHello", "col": (0.5, 1.0, 0.62), "burst": 2,
+                          "row": f"tls {ph.get('version','')} \u00b7 {ph.get('cipher','')} \u00b7 {ms:.1f} ms",
+                          "rcol": (0.55, 0.95, 0.7)})
+                q.append({"dir": "back", "label": "ServerHello", "col": (0.62, 1.0, 0.72), "burst": 2,
+                          "row": "", "rcol": (0.62, 1.0, 0.72)})
+            elif nm == "request":
+                lbl = f"{ph.get('method','GET')} {ph.get('path','/')}"
+                q.append({"dir": "out", "label": lbl, "col": (1.0, 0.60, 0.30),
+                          "burst": 1 + by // 700,
+                          "row": f"{lbl} \u00b7 {by}b", "rcol": (1.0, 0.65, 0.4)})
+            elif nm == "response":
+                q.append({"dir": "back", "label": f"{ph.get('status','')} \u00b7 {by}b",
+                          "col": (0.55, 1.0, 0.62), "burst": 1 + by // 9000,
+                          "row": f"response \u00b7 http {ph.get('status','')} \u00b7 {ms:.1f} ms \u00b7 {by}b",
+                          "rcol": (0.6, 1.0, 0.7)})
+        self._pkt_q = q
+        self._pkt_i = 0
+        self._pkt_t = 0.0
+
+    def _packet_step(self, dt):
+        if self.service is None:
+            self.pkt = []
+            return
+        if self._pkt_i < len(self._pkt_q):
+            self._pkt_t += dt
+            if self._pkt_t >= 0.14:
+                self._pkt_t = 0.0
+                ev = self._pkt_q[self._pkt_i]
+                self._pkt_i += 1
+                for k in range(max(1, ev.get("burst", 1))):
+                    self.pkt.append({"ev": ev, "t0": time.time() - k * 0.035, "dur": 0.55})
+                if ev.get("row"):
+                    self.pkt_rows.append({"txt": ev["row"],
+                                          "col": ev.get("rcol", (0.7, 0.9, 1.0))})
+                    if len(self.pkt_rows) > 16:
+                        self.pkt_rows = self.pkt_rows[-16:]
+        now = time.time()
+        self.pkt = [p for p in self.pkt if now - p["t0"] < p["dur"]]
+
+    def _draw_packets(self, t):
+        """The link itself: console \u2192 far service, with the packets mid-flight."""
+        if self.service is None:
+            return
+        (cx, cy, cz), (sx, sy, sz) = self._service_geom()
+        # the wire drawn between them
+        glLineWidth(1.0)
+        glColor4f(0.25, 0.55, 0.70, 0.45)
+        glBegin(GL_LINES)
+        glVertex3f(cx, cy, cz)
+        glVertex3f(sx, sy, sz)
+        glEnd()
+        # the far service: a monolith of light on the ring's edge
+        pulse = 0.5 + 0.5 * math.sin(t * 1.6)
+        self._cube(sx, sy, sz, 1.6, 3.4, 1.6, (0.10, 0.30, 0.42))
+        glColor4f(0.35, 0.85 + 0.10 * pulse, 1.0, 0.30)
+        glBegin(GL_QUADS)
+        glVertex3f(sx - 1.9, sy + 3.4, sz)
+        glVertex3f(sx + 1.9, sy + 3.4, sz)
+        glVertex3f(sx + 1.9, sy + 9.5, sz)
+        glVertex3f(sx - 1.9, sy + 9.5, sz)
+        glEnd()
+        # the console: a low bench you stand at
+        self._cube(cx, cy - 2.0, cz, 1.5, 1.2, 1.5, (0.12, 0.22, 0.28))
+        # every packet, again, at the place it truly is along the wire
+        now = time.time()
+        for p in self.pkt:
+            ev = p["ev"]
+            u = (now - p["t0"]) / p["dur"]
+            u = 0.0 if u < 0 else (1.0 if u > 1 else u)
+            if ev.get("dir") == "out":
+                x = cx + (sx - cx) * u
+                yv = cy + (sy - cy) * u
+                z = cz + (sz - cz) * u
+            else:
+                x = sx + (cx - sx) * u
+                yv = sy + (cy - sy) * u
+                z = sz + (cz - sz) * u
+            fade = 1.0 - 0.5 * u
+            c = ev.get("col", (0.8, 0.9, 1.0))
+            self._octa(x, yv, z, 0.20, (c[0] * fade, c[1] * fade, c[2] * fade), squash=1.0)
+
 
     def _web_extract(self, raw, limit=40000):
         """The readable text of a real page: scripts and markup stripped, nothing
@@ -2715,64 +3005,110 @@ class WireGLWidget(QOpenGLWidget):
 
     def _hud_ddg(self, pr: QPainter, now):
         w_, h_ = self.width(), self.height()
-        pr.fillRect(0, 0, w_, h_, QColor(0, 0, 0, 176))
+        at = self._at_console()
+        # the world stays visible under a light film — the packets are the show
+        pr.fillRect(0, 0, w_, h_, QColor(0, 0, 0, 96))
         pr.setFont(QFont("Monospace", 9))
         pr.setPen(QColor(150, 235, 255))
-        pr.drawText(14, 22, "THE EXCHANGE  //  DUCKDUCKGO  \u2014  a real search, served in the wire")
-        m, top = 56, 44
-        bot = h_ - 72
-        pr.fillRect(m, top, w_ - 2 * m, bot - top, QColor(4, 10, 16, 214))
+        pr.drawText(14, 22, "THE EXCHANGE  //  DUCKDUCKGO  \u2014  watch the packets leave the console")
+        # the live packet ledger, down the right
+        lx = w_ - 316
+        ly = 44
+        pr.fillRect(lx, ly, 300, h_ - ly - 96, QColor(4, 10, 16, 200))
         pr.setPen(QColor(40, 70, 80))
-        pr.drawRect(m, top, w_ - 2 * m, bot - top)
-        if self.web_page is not None:
-            self._hud_ddg_reader(pr, m, top, w_ - 2 * m, bot - top, now)
+        pr.drawRect(lx, ly, 300, h_ - ly - 96)
+        pr.setPen(QColor(120, 220, 240))
+        pr.drawText(lx + 12, ly + 20, "PACKET LEDGER  \u00b7  as measured")
+        yy = ly + 42
+        if not self.pkt_rows:
+            pr.setPen(QColor(90, 130, 140))
+            pr.drawText(lx + 12, yy, "\u2014 no packets in flight \u2014")
+        for row in self.pkt_rows:
+            if yy > h_ - 118:
+                break
+            c = row.get("col", (0.7, 0.9, 1.0))
+            pr.setPen(QColor(int(c[0] * 255), int(c[1] * 255), int(c[2] * 255)))
+            pr.drawText(lx + 12, yy, row["txt"][:44])
+            yy += 15
+        if self.web_net:
+            pr.setPen(QColor(120, 180, 190))
+            pr.drawText(lx + 12, h_ - 118,
+                        f"far service: {self.web_net.get('host','?')}")
+            pr.drawText(lx + 12, h_ - 104, f"{self.web_net.get('ip','')}")
+        # what is left to fly: the result-tablets, named where they hang
+        self._hud_tablets(pr, now, w_, h_)
+        if self.web_mono is not None:
+            self._hud_mono(pr, now, w_, h_)
             return
-        # the query line, with a blinking caret
-        caret = "\u2588" if int(now * 2) % 2 == 0 else " "
-        pr.setFont(QFont("Monospace", 12))
-        pr.setPen(QColor(205, 240, 255))
-        pr.drawText(m + 16, top + 38, "\u25b8 " + self.web_query + caret)
+        # the console line — only while you actually stand at it
+        if at:
+            caret = "\u2588" if int(now * 2) % 2 == 0 else " "
+            pr.setFont(QFont("Monospace", 13))
+            pr.setPen(QColor(205, 240, 255))
+            pr.drawText(20, h_ - 74, "\u25b8 " + self.web_query + caret)
+        else:
+            pr.setPen(QColor(150, 200, 210))
+            pr.drawText(20, h_ - 74, "fly back to the console to type a new search")
         pr.setFont(QFont("Monospace", 9))
         pr.setPen(QColor(140, 200, 210))
-        pr.drawText(m + 16, top + 58, self.web_status[:130])
-        # the results, as they came
-        y0 = top + 86
-        pr.setFont(QFont("Monospace", 9))
-        for i, hit in enumerate(self.web_results[:10]):
-            yy = y0 + i * 40
-            if yy > bot - 24:
-                break
-            pr.setPen(QColor(255, 200, 90))
-            pr.drawText(m + 16, yy, "0" if i == 9 else str(i + 1))
-            pr.setPen(QColor(140, 235, 255))
-            pr.drawText(m + 40, yy, hit["title"][:96])
-            pr.setPen(QColor(120, 170, 185))
-            pr.drawText(m + 40, yy + 14, hit["url"][:104])
-            if hit.get("snippet"):
-                pr.setPen(QColor(168, 198, 205))
-                pr.drawText(m + 40, yy + 27, hit["snippet"][:124])
+        pr.drawText(20, h_ - 54, self.web_status[:118])
         pr.setPen(QColor(120, 235, 220))
-        pr.drawText(14, h_ - 66, "type a search  \u00b7  Enter to ask  \u00b7  1-9 / 0 open a result  \u00b7  Esc step back")
+        pr.drawText(14, h_ - 34,
+                    "at the console: type + Enter  \u00b7  fly to a tablet + E to open  "
+                    "\u00b7  [ ] page  \u00b7  Esc  \u00b7  Home leave")
 
-    def _hud_ddg_reader(self, pr: QPainter, m, top, ww, hh, now):
-        pr.setFont(QFont("Monospace", 10))
-        pr.setPen(QColor(150, 240, 255))
-        pr.drawText(m + 16, top + 26, self.web_page["title"][:112])
+    def _hud_tablets(self, pr, now, w_, h_):
+        if not self.web_tabs:
+            return
+        try:
+            vp = glGetIntegerv(GL_VIEWPORT)
+        except Exception:
+            return
         pr.setFont(QFont("Monospace", 9))
-        pr.setPen(QColor(120, 170, 185))
-        pr.drawText(m + 16, top + 42, self.web_page["url"][:124])
-        pr.setPen(QColor(150, 200, 200))
-        pr.drawText(m + 16, top + 58, "served \u00b7 " + (self.web_page.get("status") or ""))
-        body = self.web_page.get("lines")
-        rect = QRect(m + 16, top + 72, ww - 32, hh - 72 - 26)
+        far = None
+        for i, tab in enumerate(self.web_tabs):
+            try:
+                sx, sy, sz = gluProject(tab["x"], EXCHANGE_FLOOR_Y + 4.0, tab["z"])
+            except Exception:
+                continue
+            if sz < 0 or sz > 1:
+                continue
+            sxx, syy = int(sx), int(vp[3] - sy)
+            if not (0 <= sxx <= w_ and 0 <= syy <= h_):
+                continue
+            d = math.hypot(self.pos[0] - tab["x"], self.pos[2] - tab["z"])
+            near = d <= 5.5
+            pr.setPen(QColor(255, 220, 120) if near else QColor(120, 200, 235))
+            pr.drawText(sxx + 6, syy, f"[{i + 1 if i < 9 else 0}] " + tab["title"][:60])
+            if near:
+                far = i
+        return far
+
+    def _hud_mono(self, pr, now, w_, h_):
+        mo = self.web_mono
+        m, top = 40, 40
+        ww, hh = w_ - 380, h_ - 150
+        pr.fillRect(m, top, ww, hh, QColor(3, 12, 18, 226))
+        pr.setPen(QColor(70, 160, 190))
+        pr.drawRect(m, top, ww, hh)
+        pr.setFont(QFont("Monospace", 11))
+        pr.setPen(QColor(160, 245, 255))
+        pr.drawText(m + 16, top + 28, mo["title"][:96])
+        pr.setFont(QFont("Monospace", 9))
+        pr.setPen(QColor(120, 175, 190))
+        pr.drawText(m + 16, top + 46, mo["url"][:118])
+        pr.setPen(QColor(150, 205, 205))
+        pr.drawText(m + 16, top + 62, "served \u00b7 " + (mo.get("status") or ""))
+        body = mo.get("lines")
+        rect = QRect(m + 16, top + 76, ww - 32, hh - 76 - 26)
         pr.setClipRect(rect)
-        pr.setPen(QColor(205, 225, 225))
-        tr = QRect(rect.x(), rect.y() - self.web_scroll, rect.width(), 100000)
-        pr.drawText(tr, int(Qt.TextFlag.TextWordWrap), body or "(reading\u2026)")
+        pr.setPen(QColor(205, 228, 228))
+        tr = QRect(rect.x(), rect.y() - mo.get("scroll", 0), rect.width(), 100000)
+        pr.drawText(tr, int(Qt.TextFlag.TextWordWrap), body or "(reaching\u2026)")
         pr.setClipping(False)
         pr.setPen(QColor(120, 235, 220))
         pr.drawText(m + 16, top + hh - 10,
-                    "[ ] scroll  \u00b7  Esc back to results  \u00b7  Home leave the Exchange")
+                    "[ ] scroll  \u00b7  Esc back  \u00b7  Home leave the Exchange")
 
     # ---- paint -------------------------------------------------------------
     def paintGL(self):
