@@ -17,14 +17,15 @@ default; the real term is one keypress away ('T'), so nobody is left behind.
 Standalone:  python3 wiregame.py
 """
 from __future__ import annotations
-import math, sys, time
+import math, sys, time, hashlib
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (QColor, QFont, QPainter, QPen, QSurfaceFormat, QCursor,
                          QRadialGradient)
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtWidgets import (
-    QCheckBox, QFrame, QHBoxLayout, QLabel, QPushButton, QSplitter,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSplitter,
     QTextBrowser, QVBoxLayout, QWidget)
 
 import numpy as np
@@ -32,6 +33,10 @@ from OpenGL.GL import *
 from OpenGL.GLU import *
 
 import wirevision
+import wiregate
+from wiregate import MARKET_FLOOR_Y, MARKET_R, RETURN_GATE_POS
+
+MARKET_GATE_POS = [6.0, 0.06, -14.0]   # the tall portal to BlackHorse, on the wire floor
 
 # index: 0 floor, 1..5 = protocol strata (top -> bottom)
 STRATA_Y = [0.0, -10.0, -20.0, -30.0, -40.0, -50.0]
@@ -41,6 +46,17 @@ PLATFORM_R = 46.0
 WELL_R = 2.6
 WALL_R = 30.0          # the wall between your segment (inside) and the old ruins
 DOOR_HALF = 0.30       # half-width (radians) of a doorway gap in that wall
+
+MARKET_STATE_COL = {
+    "buy": (0.30, 0.96, 0.46),      # waiting to BUY  -> green
+    "sell": (0.96, 0.30, 0.33),     # waiting to SELL -> red
+    "selling": (1.00, 0.16, 0.22),  # an exit is firing
+    "off": (0.40, 0.43, 0.50),      # disabled
+}
+MARKET_STATE_TXT = {
+    "buy": "waiting to buy", "sell": "waiting to sell",
+    "selling": "selling now", "off": "off",
+}
 
 PAL = {
     "floor":     {"sky": (0.02, 0.07, 0.09), "a": (0.06, 0.16, 0.18), "b": (0.04, 0.11, 0.13), "accent": (0.98, 0.72, 0.22), "hill": (0.03, 0.09, 0.11)},
@@ -71,6 +87,10 @@ def _norm(v):
 class WireGLWidget(QOpenGLWidget):
     stratum_changed = pyqtSignal(int, str)     # index, focus label (may be "")
     request_rebuild = pyqtSignal()
+    market_opened = pyqtSignal(object)         # the wiregate market snapshot
+    market_closed = pyqtSignal()
+    agent_selected = pyqtSignal(object)        # an agent dict (one platform)
+    menu_toggle = pyqtSignal(bool)             # show/hide the market menu
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -86,6 +106,16 @@ class WireGLWidget(QOpenGLWidget):
         self.show_real = False
         self.transition = None
         self.deep = None            # the open sea below the edge: unbounded, no data
+        self.flying = False         # free flight through the wire (G toggles)
+        # the market — blackhorse, entered through the gate on the wire floor
+        self.market = False
+        self.market_world = None
+        self.presence = None
+        self.selected_agent = None
+        self.selected = None
+        self._peers = []
+        self._online = False
+        self._beat = 0.0
         self._last_t = time.time()
         self._hud_msg = ""
         self._hud_until = 0.0
@@ -141,6 +171,11 @@ class WireGLWidget(QOpenGLWidget):
         self.focus = ""
         self.transition = None
         self.deep = None
+        self.flying = False
+        self.market = False
+        self.market_world = None
+        self.selected_agent = None
+        self.selected = None
         self.pos = [0.0, EYE, 10.0]
         self.yaw = 0.0
         self.pitch = -0.05
@@ -439,6 +474,34 @@ class WireGLWidget(QOpenGLWidget):
             x, z = c["pos"]
             bob = 0.5 * math.sin(t * 1.6 + x)
             self._crow(x, y + 4.0 + bob, z, t)
+        # the gate to BlackHorse — the market, entered from the wire
+        self._draw_market_gate(t, y)
+
+    def _draw_market_gate(self, t, y):
+        gx, gy, gz = MARKET_GATE_POS
+        r = 2.1 + 0.18 * math.sin(t * 1.3)
+        gc = (0.55, 0.30, 0.75)
+        self._cube(gx, y + 3.2, gz, 0.9, 6.6, 0.9, (gc[0] * 0.5, gc[1] * 0.5, gc[2] * 0.5))
+        glColor4f(gc[0] * 0.16, gc[1] * 0.16, gc[2] * 0.22, 0.9)
+        glBegin(GL_TRIANGLE_FAN)
+        glVertex3f(gx, y + 3.2, gz)
+        for i in range(33):
+            a = 2 * math.pi * i / 32
+            glVertex3f(gx + r * 0.95 * math.cos(a), y + 3.2 + r * 0.95 * math.sin(a), gz)
+        glEnd()
+        glLineWidth(2.0)
+        glColor4f(0.95, 0.55, 0.20, 1.0)
+        glBegin(GL_LINE_LOOP)
+        for i in range(48):
+            a = 2 * math.pi * i / 48
+            glVertex3f(gx + r * math.cos(a), y + 3.2 + r * math.sin(a), gz)
+        glEnd()
+        glLineWidth(1.0)
+        for i in range(22):
+            a = 2 * math.pi * i / 22
+            bx, by = gx + r * math.cos(a), y + 3.2 + r * math.sin(a)
+            self._octa(bx, by, gz, 0.26, (0.85, 0.45, 0.15), squash=0.6)
+        self._portal(gx, gz, gy, 2.6, (0.95, 0.55, 0.20), t)
 
     # ---- the floor as ROOMS: your segment inside, old segments as ruins -----
     def _ruin_segments(self):
@@ -530,6 +593,8 @@ class WireGLWidget(QOpenGLWidget):
     def _labels(self):
         """Screen-space labels for the active scene. Returns list of (sx,sy,txt,color)."""
         out = []
+        if self.market:
+            return self._market_labels()
         if not self.world:
             return out
         y = self._floor_y()
@@ -588,6 +653,10 @@ class WireGLWidget(QOpenGLWidget):
                 dx, dz = WALL_R * math.cos(s["angle"]), WALL_R * math.sin(s["angle"])
                 items.append((dx, y + 5.8, dz, f"door \u2192 {s['subnet']} (a memory)",
                               (0.95, 0.70, 0.40)))
+            gx, gy, gz = MARKET_GATE_POS
+            items.append((gx, y + 6.8, gz,
+                          "the gate to BlackHorse \u2014 the market [E], "
+                          "reached from the wire floor", (0.95, 0.55, 0.20)))
         else:
             st = self.world["strata"][self.active - 1]
             for a in st["artifacts"]:
@@ -615,20 +684,33 @@ class WireGLWidget(QOpenGLWidget):
         if k == Qt.Key.Key_Escape:
             self._drag = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
+            if self.market and self.selected_agent:
+                self.selected_agent = None
+                self.selected = None
+                self._flash("closed the trading panel")
         elif k == Qt.Key.Key_E:
             if self.deep is not None:
                 self._exit_deep()          # rise back to the edge
             else:
                 self._interact()
         elif k == Qt.Key.Key_B:
-            self.request_rebuild.emit()
+            if self.market:
+                self.refresh_market()
+            else:
+                self.request_rebuild.emit()
         elif k == Qt.Key.Key_T:
             self.show_real = not self.show_real
+        elif k == Qt.Key.Key_H:
+            self.menu_toggle.emit(True)
         elif k == Qt.Key.Key_Home:
-            if self.deep is not None:
+            if self.market:
+                self._leave_market()
+            elif self.deep is not None:
                 self._exit_deep(surface=True)
             else:
                 self._go_surface()
+        elif k == Qt.Key.Key_G:
+            self._toggle_fly()
         else:
             self.keys.add(k)
         super().keyPressEvent(e)
@@ -659,6 +741,9 @@ class WireGLWidget(QOpenGLWidget):
 
     # ---- movement + interaction -------------------------------------------
     def _step(self, dt):
+        if self.market:
+            self._market_step(dt)
+            return
         if self.deep is not None:
             d = self.deep
             d["vy"] = min(22.0, d["vy"] + 16.0 * dt)     # fall, then terminal drift
@@ -714,6 +799,9 @@ class WireGLWidget(QOpenGLWidget):
             self.pitch = min(1.2, self.pitch + yaw_spd)
         if Qt.Key.Key_Down in k or Qt.Key.Key_F in k:
             self.pitch = max(-1.2, self.pitch - yaw_spd)
+        if self.flying:
+            self._fly_step(dt, fast)
+            return
         fx, fz = math.sin(self.yaw), -math.cos(self.yaw)
         rx, rz = math.cos(self.yaw), math.sin(self.yaw)
         dx = dz = 0.0
@@ -744,7 +832,303 @@ class WireGLWidget(QOpenGLWidget):
         # gentle step height for the eye
         self.pos[1] = self._floor_y() + EYE
 
+    # ---- flight: move freely through the wire (G) -------------------------
+    def _toggle_fly(self):
+        if self.deep is not None or self.transition is not None:
+            return
+        self.flying = not self.flying
+        if not self.flying:
+            self.pos[1] = self._floor_y() + EYE     # settle back onto the floor
+            self._flash("landed on the wire")
+        else:
+            self._flash("flight on — Space up \u00b7 C down \u00b7 W/S/A/D glide")
+
+    def _fly_step(self, dt, fast):
+        k = self.keys
+        spd = 13.0 * fast * dt
+        cp = math.cos(self.pitch)
+        fx, fy, fz = cp * math.sin(self.yaw), math.sin(self.pitch), -cp * math.cos(self.yaw)
+        rx, rz = math.cos(self.yaw), math.sin(self.yaw)
+        dx = dy = dz = 0.0
+        if Qt.Key.Key_W in k:
+            dx += fx; dy += fy; dz += fz
+        if Qt.Key.Key_S in k:
+            dx -= fx; dy -= fy; dz -= fz
+        if Qt.Key.Key_A in k:
+            dx -= rx; dz -= rz
+        if Qt.Key.Key_D in k:
+            dx += rx; dz += rz
+        if Qt.Key.Key_Space in k:
+            dy += 1.0
+        if Qt.Key.Key_C in k:
+            dy -= 1.0
+        m = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if m > 0:
+            self.pos[0] += dx / m * spd
+            self.pos[1] += dy / m * spd
+            self.pos[2] += dz / m * spd
+        rr = math.hypot(self.pos[0], self.pos[2])
+        if rr > PLATFORM_R - 1.5:
+            self.pos[0] = self.pos[0] / rr * (PLATFORM_R - 1.5)
+            self.pos[2] = self.pos[2] / rr * (PLATFORM_R - 1.5)
+        # the nearest stratum is the layer you see: glide up and down the stack,
+        # and past the edge into the open sea (still just atmosphere, no entity).
+        self.active = min(range(len(STRATA_Y)),
+                          key=lambda i: abs((STRATA_Y[i] + EYE) - self.pos[1]))
+        hi = EYE + 36.0
+        lo = STRATA_Y[-1] + EYE - 60.0
+        self.pos[1] = max(lo, min(hi, self.pos[1]))
+
+    # ---- the market: blackhorse, entered from the wire ---------------------
+    def _market_floor(self):
+        if self.market_world:
+            return float(self.market_world.get("floor_y", MARKET_FLOOR_Y))
+        return MARKET_FLOOR_Y
+
+    def _enter_market(self):
+        try:
+            self.market_world = wiregate.snapshot()
+        except Exception as e:
+            self._flash(f"could not open the market: {e}")
+            return
+        if self.presence is None:
+            self.presence = wiregate.Presence()
+            self.presence.start()
+        self.market = True
+        self.transition = None
+        self.deep = None
+        self.flying = True
+        self.active = 0
+        self.selected_agent = None
+        self.selected = None
+        self._beat = 0.0
+        self._peers = self.presence.peers() if self.presence else []
+        floor = self._market_floor()
+        self.pos = [0.0, floor + EYE, 30.0]
+        self.yaw = 0.0
+        self.pitch = -0.05
+        acc = self.market_world.get("account", {})
+        self._flash(f"blackhorse \u2014 the market \u00b7 {acc.get('mode')} "
+                    f"\u00b7 cash {acc.get('cash')} {acc.get('currency')}")
+        self.market_opened.emit(self.market_world)
+
+    def _leave_market(self):
+        was = self.market
+        self.market = False
+        self.market_world = None
+        self.selected_agent = None
+        self.selected = None
+        self.flying = False
+        if self.presence is not None:
+            try:
+                self.presence.leave()
+            except Exception:
+                pass
+        self.pos = [16.0, EYE, -8.0]
+        self.yaw = math.pi
+        self.pitch = -0.05
+        self.active = 0
+        if was:
+            self._flash("back on the wire \u2014 the market is closed")
+            self.market_closed.emit()
+
+    def refresh_market(self):
+        """Re-read blackhorse's files and rebuild the market floor (B inside)."""
+        if not self.market:
+            return
+        try:
+            self.market_world = wiregate.snapshot()
+        except Exception as e:
+            self._flash(f"market rebuild failed: {e}")
+            return
+        if self.market_world:
+            self._flash(f"market rebuilt \u00b7 fp {self.market_world.get('fingerprint')}")
+            self.market_opened.emit(self.market_world)
+            self.update()
+
+    def _market_step(self, dt):
+        k = self.keys
+        fast = 2.2 if Qt.Key.Key_Shift in k else 1.0
+        spd = 13.0 * fast * dt
+        cp = math.cos(self.pitch)
+        fx, fy, fz = cp * math.sin(self.yaw), math.sin(self.pitch), -cp * math.cos(self.yaw)
+        rx, rz = math.cos(self.yaw), math.sin(self.yaw)
+        dx = dy = dz = 0.0
+        if Qt.Key.Key_W in k:
+            dx += fx; dy += fy; dz += fz
+        if Qt.Key.Key_S in k:
+            dx -= fx; dy -= fy; dz -= fz
+        if Qt.Key.Key_A in k:
+            dx -= rx; dz -= rz
+        if Qt.Key.Key_D in k:
+            dx += rx; dz += rz
+        if Qt.Key.Key_Space in k:
+            dy += 1.0
+        if Qt.Key.Key_C in k:
+            dy -= 1.0
+        m = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if m > 0 and not self._on_any_platform(ignore=0.0, pad_only=False):
+            self.pos[0] += dx / m * spd
+            self.pos[1] += dy / m * spd
+            self.pos[2] += dz / m * spd
+        rr = math.hypot(self.pos[0], self.pos[2])
+        if rr > MARKET_R - 1.5:
+            self.pos[0] = self.pos[0] / rr * (MARKET_R - 1.5)
+            self.pos[2] = self.pos[2] / rr * (MARKET_R - 1.5)
+        floor = self._market_floor()
+        self.pos[1] = max(floor + EYE * 0.4, min(floor + 64.0, self.pos[1]))
+        # announce to the relay on a beat, then read who else is here
+        self._beat += dt
+        if self.presence and self._beat >= 1.2:
+            self._beat = 0.0
+            ok = self.presence.announce({"x": self.pos[0], "y": self.pos[1], "z": self.pos[2]})
+            self._peers = self.presence.peers()
+            self._online = ok
+        # landing: flying down onto a platform = stepping on it
+        w = self.market_world
+        if w:
+            for a in w["agents"]:
+                x, yy, z = a["pos"]
+                d2 = math.hypot(self.pos[0] - x, self.pos[2] - z)
+                if d2 <= a.get("radius", 4.2) + 1.0 and abs(self.pos[1] - yy) <= 3.4:
+                    self.flying = False
+                    self.pos[0], self.pos[1], self.pos[2] = x, yy + EYE, z
+                    if self.selected_agent != a["id"]:
+                        self.selected_agent = a["id"]
+                        self.selected = a
+                        self._flash(f"you are standing on {a['name']}'s platform "
+                                    f"\u2014 [E] open its trading settings")
+                    break
+
+    def _on_any_platform(self, ignore=0.0, pad_only=True):
+        w = self.market_world or {}
+        for a in w.get("agents", []):
+            x, yy, z = a["pos"]
+            if math.hypot(self.pos[0] - x, self.pos[2] - z) <= a.get("radius", 4.2) + 1.0 \
+                    and abs(self.pos[1] - yy) <= 3.4:
+                return a
+        return None
+
+    def _peer_col(self, name):
+        h = int(hashlib.md5(name.encode()).hexdigest()[:8], 16)
+        return (0.4 + 0.6 * ((h >> 16) & 255) / 255,
+                0.4 + 0.6 * ((h >> 8) & 255) / 255,
+                0.4 + 0.6 * (h & 255) / 255)
+
+    def _draw_peer(self, p, t):
+        x, z = p["x"], p["z"]
+        yy = p["y"]
+        bob = 0.4 * math.sin(t * 2.4 + x)
+        col = self._peer_col(p["name"])
+        self._octa(x, yy + bob, z, 0.7, col, squash=1.1)
+        self._cube(x, yy + bob - 1.3, z, 0.9, 1.1, 0.9,
+                   (col[0] * 0.55, col[1] * 0.55, col[2] * 0.55))
+
+    # ---- the market scene ---------------------------------------------------
+    def _market_sky(self):
+        glClearColor(0.012, 0.016, 0.024, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        y = self._market_floor()
+        glLineWidth(1.0)
+        glColor4f(0.10, 0.16, 0.22, 1.0)
+        glBegin(GL_LINE_LOOP)
+        for i in range(48):
+            a = 2 * math.pi * i / 48
+            glVertex3f((MARKET_R - 1.0) * math.cos(a), y + 0.02,
+                       (MARKET_R - 1.0) * math.sin(a))
+        glEnd()
+        glLineWidth(1.0)
+
+    def _draw_market(self, t):
+        w = self.market_world
+        if not w:
+            return
+        y = self._market_floor()
+        # the floor: a dark disc with a grid of wiring rings
+        glColor4f(0.045, 0.070, 0.095, 1.0)
+        glBegin(GL_TRIANGLE_FAN)
+        glVertex3f(0, y, 0)
+        for i in range(33):
+            a = 2 * math.pi * i / 32
+            glVertex3f(MARKET_R * math.cos(a), y, MARKET_R * math.sin(a))
+        glEnd()
+        glLineWidth(1.0)
+        for r in (10, 20, 30, 40, 50):
+            glColor4f(0.09, 0.16, 0.18, 1.0)
+            glBegin(GL_LINE_LOOP)
+            for i in range(40):
+                a = 2 * math.pi * i / 40
+                glVertex3f(r * math.cos(a), y + 0.03, r * math.sin(a))
+            glEnd()
+        # the centre column: your account, breathing with the loop heartbeat
+        loop = w.get("loop", {})
+        ok = loop.get("heartbeat") == "ok"
+        beat = 1.0 + 0.15 * math.sin(t * (1.3 if ok else 0.35))
+        col = (0.55, 0.85, 0.75) if ok else (0.85, 0.25, 0.22)
+        self._prism(0, 0, 2.6 * beat, 1.7 * beat, y, y + 14.0, 6,
+                    (col[0], col[1], col[2]))
+        col2 = (col[0] * 0.7, col[1] * 0.7, col[2] * 0.7)
+        self._prism(0, 0, 1.7 * beat, 3.1 * beat, y + 14.0, y + 16.5, 4, col2)
+        # the platforms: one per trading agent, coloured by what it waits for
+        for a in w.get("agents", []):
+            x, z = a["pos"][0], a["pos"][2]
+            yy = a["pos"][1]
+            st = a["state"]
+            base = MARKET_STATE_COL.get(st, MARKET_STATE_COL["off"])
+            if a.get("enabled") and st != "off":
+                pulse = 1.0 + 0.16 * math.sin(t * 2.2 + x * 0.5)
+                base = tuple(min(1.0, c * pulse) for c in base)
+            if self.selected_agent == a["id"]:
+                self._portal(x, z, yy, a.get("radius", 4.2) + 0.7, (1.0, 1.0, 1.0), t)
+            pillar = (base[0] * 0.45, base[1] * 0.45, base[2] * 0.45)
+            self._prism(x, z, 0.85, 0.55, y - 0.2, yy, 6, pillar)
+            r0 = a.get("radius", 4.2)
+            self._prism(x, z, r0, r0 * 0.94, yy, yy + 1.1, 6, base)
+            bob = 0.3 * math.sin(t * 1.8 + x)
+            self._octa(x, yy + 2.4 + bob, z, 0.55, (base[0], base[1], base[2]),
+                       squash=1.3)
+        # other users, announced over the relay
+        for p in self._peers:
+            self._draw_peer(p, t)
+        # the return gate back to the wire
+        rx, ry, rz = RETURN_GATE_POS
+        self._portal(rx, rz, ry - 0.5, 3.4, (0.85, 0.45, 0.95), t + 1.0)
+        self._portal(rx, rz, ry + 2.5, 2.2, (0.60, 0.30, 0.75), t + 2.0)
+        glLineWidth(1.0)
+
+    def _market_labels(self):
+        out = []
+        vp = glGetIntegerv(GL_VIEWPORT)
+        items = []
+        w = self.market_world or {}
+        for a in w.get("agents", []):
+            x, z = a["pos"][0], a["pos"][2]
+            yy = a["pos"][1]
+            txt = f"{a['name']} \u00b7 {MARKET_STATE_TXT.get(a['state'], a['state'])}" \
+                  f" \u00b7 {(a.get('capital') or 0):g} {a.get('mode', '?')}"
+            if a.get("net_pct") is not None:
+                txt += f" \u00b7 net {a['net_pct']}%"
+            col = MARKET_STATE_COL.get(a["state"], (0.6, 0.6, 0.65))
+            items.append((x, yy + 3.5, z, txt, col))
+        for p in self._peers:
+            items.append((p["x"], p["y"] + 2.0, p["z"], f"\u25c8 {p['name']}",
+                          self._peer_col(p["name"])))
+        rx, ry, rz = RETURN_GATE_POS
+        items.append((rx, ry + 2.6, rz, "leave the market [E] \u2014 back to the wire",
+                      (0.90, 0.72, 0.98)))
+        for (x, yy, z, txt, col) in items:
+            try:
+                sx, sy, sz = gluProject(x, yy, z)
+            except Exception:
+                continue
+            if sz < 0 or sz > 1:
+                continue
+            out.append((sx, vp[3] - sy, txt, col))
+        return out
+
     def _nearest(self):
+        if self.market:
+            return self._nearest_market()
         if not self.world or self.deep is not None:
             return None
         px, pz = self.pos[0], self.pos[2]
@@ -758,6 +1142,7 @@ class WireGLWidget(QOpenGLWidget):
             for g in self.world["gates"]:
                 consider("gate", g["pos"][0], g["pos"][1], 3.0, domain=g["domain"], count=g["count"])
             consider("heart", 0, -8, 4.5)
+            consider("market", MARKET_GATE_POS[0], MARKET_GATE_POS[2], 4.6)
             for s in self._ruin_segments():
                 dx = WALL_R * math.cos(s["angle"])
                 dz = WALL_R * math.sin(s["angle"])
@@ -771,13 +1156,46 @@ class WireGLWidget(QOpenGLWidget):
             consider("electron", 0, 0, WELL_R + 3.0)
         return best
 
+    def _nearest_market(self):
+        px, py, pz = self.pos
+        best = None
+        def consider(kind, x, z, yy, radius, **kw):
+            nonlocal best
+            d = math.hypot(px - x, pz - z)
+            dy = abs(py - yy)
+            if d <= radius and dy <= 10.0 and (best is None or d < best["d"]):
+                best = {"kind": kind, "d": d, **kw}
+        for a in (self.market_world or {}).get("agents", []):
+            x, yy, z = a["pos"]
+            consider("platform", x, z, yy, a.get("radius", 4.2) + 1.5, agent=a)
+        rx, ry, rz = RETURN_GATE_POS
+        consider("leave_market", rx, rz, ry, 5.0)
+        return best
+
     def _interact(self):
         n = self._nearest()
         if not n:
             return
+        if self.market:
+            if n["kind"] == "platform":
+                a = n["agent"]
+                if self.selected_agent != a["id"]:
+                    self.selected_agent = a["id"]
+                    self.selected = a
+                    self._flash(f"{a['name']} \u2014 {MARKET_STATE_TXT.get(a['state'], a['state'])} "
+                                f"\u00b7 {a.get('mode', '?')} \u00b7 capital {a.get('capital')}")
+                self.agent_selected.emit(a)
+            elif n["kind"] == "leave_market":
+                self._leave_market()
+            return
+        if self.flying and n["kind"] in ("gate", "well", "up", "electron", "ruin"):
+            self._flash("land first (G) to use the well and the gates")
+            return
         if n["kind"] == "gate":
             self._start_transition(1, focus=n["domain"])
             self._flash(f"following {n['domain']} ×{n['count']}")
+        elif n["kind"] == "market":
+            self._enter_market()
         elif n["kind"] == "heart":
             h = self.world["heart"]
             rtt = "?" if h.get("rtt") is None else f"{round(float(h['rtt']), 1)}ms"
@@ -826,7 +1244,10 @@ class WireGLWidget(QOpenGLWidget):
 
         key = STRATA_KEY[self.active]
         p = PAL[key]
-        self._sky_and_hills(p)
+        if self.market:
+            self._market_sky()
+        else:
+            self._sky_and_hills(p)
 
         # camera
         w_, h_ = max(1, self.width()), max(1, self.height())
@@ -848,7 +1269,9 @@ class WireGLWidget(QOpenGLWidget):
             self._deep_motes(now)
         else:
             self._glyph_rain(now)
-        if self.world and self.deep is None:
+        if self.market:
+            self._draw_market(now)
+        elif self.world and self.deep is None:
             self._ground(p)
             self._well(now)
             if self.active == 0:
@@ -865,6 +1288,87 @@ class WireGLWidget(QOpenGLWidget):
         finally:
             painter.end()
 
+    def _hud_market(self, pr: QPainter, now):
+        w_, h_ = self.width(), self.height()
+        f = QFont("Monospace", 9)
+        pr.setFont(f)
+        fm = pr.fontMetrics()
+        mw = self.market_world or {}
+        acc = mw.get("account", {})
+        mode = acc.get("mode", "?")
+        cash = acc.get("cash")
+        alloc = acc.get("allocated")
+        cur = acc.get("currency", "")
+        loop = mw.get("loop", {})
+        ok = loop.get("heartbeat") == "ok"
+        line1 = "SECTION 9  //  WIRE VISION  \u2014  THE MARKET (BLACKHORSE)"
+        pr.setPen(QColor(120, 235, 220))
+        pr.drawText(14, 22, line1)
+        pr.setPen(QColor(90, 150, 160))
+        pr.drawText(14, 36, "blackhorse \u00b7 the trading floor, reached through the gate on the wire")
+        pr.setPen(QColor(180, 200, 220))
+        pr.drawText(14, 52, "you are in the market   [blackhorse]")
+        # account block (real files, honest values)
+        pr.setPen(QColor(0, 0, 0, 40))
+        px = w_ - 320
+        pr.fillRect(px, 30, 306, 92, QColor(10, 18, 24, 190))
+        yy = 46
+        pr.setPen(QColor(210, 235, 230))
+        pr.drawText(px + 10, yy, f"BLACKHORSE \u00b7 {mode}")
+        pr.setPen(QColor(150, 200, 195))
+        s = f"cash {cash:g} {cur} \u00b7 allocated {alloc:g}" if cash is not None else f"mode {mode}"
+        pr.drawText(px + 10, yy + 16, s)
+        if loop:
+            pr.setPen(QColor(120, 230, 160) if ok else QColor(235, 90, 70))
+            reason = loop.get("reason") or loop.get("decision") or "?"
+            pr.drawText(px + 10, yy + 32, f"loop {reason}"[:80])
+        n = len(self._peers)
+        online = self._online or n > 0
+        pr.setPen(QColor(160, 190, 210))
+        if online:
+            msg = f"relay online \u00b7 {n} other user{'' if n == 1 else 's'} on the floor"
+        else:
+            msg = "alone here \u00b7 no other user on the relay"
+        pr.drawText(px + 10, yy + 48, msg)
+        # legend + honesty
+        pr.setPen(QColor(150, 190, 180))
+        pr.drawText(14, h_ - 118,
+                    "green = waiting to buy \u00b7 red = waiting to sell \u00b7 "
+                    "pulsing red = an exit is firing \u00b7 dim = off")
+        pr.setPen(QColor(130, 165, 175))
+        pr.drawText(14, h_ - 102,
+                    "platforms are YOUR trading agents (real config); "
+                    "bodies are other users on the relay (real); the floor is dressing")
+        pr.setPen(QColor(120, 235, 220))
+        pr.drawText(14, h_ - 78,
+                    "WASD fly \u00b7 Space/C up/down \u00b7 E step / settings \u00b7 "
+                    "B rebuild \u00b7 H menu \u00b7 Home leave")
+        # fallback control hint when instructions are off
+        pr.setPen(QColor(180, 200, 220))
+        pr.drawText(14, h_ - 62, "it is always open \u00b7 step onto a platform to trade")
+        n0 = self._nearest()
+        ccx, ccy = w_ // 2, h_ // 2
+        if n0:
+            pr.setPen(QPen(QColor(255, 185, 40, 235), 2))
+        else:
+            pr.setPen(QPen(QColor(120, 230, 180, 190), 2))
+        for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+            pr.drawLine(ccx + dx * 18, ccy + dy * 18, ccx + dx * 18 + dx * 12, ccy + dy * 18)
+            pr.drawLine(ccx + dx * 18, ccy + dy * 18, ccx + dx * 18, ccy + dy * 18 + dy * 12)
+        if n0:
+            if n0["kind"] == "platform":
+                a = n0["agent"]
+                prompt = f"[E] step onto {a['name']}'s platform \u2014 open its trading settings"
+            elif n0["kind"] == "leave_market":
+                prompt = "[E] leave the market \u2014 back to the wire"
+            pr.setPen(QColor(255, 215, 120))
+            tw = fm.horizontalAdvance(prompt)
+            pr.drawText((w_ - tw) // 2, ccy + 46, prompt)
+        if self._hud_msg and now < self._hud_until:
+            pr.setPen(QColor(120, 230, 180))
+            tw = fm.horizontalAdvance(self._hud_msg)
+            pr.drawText((w_ - tw) // 2, h_ - 40, self._hud_msg)
+
     def _hud(self, pr: QPainter, now, key):
         w_, h_ = self.width(), self.height()
         f = QFont("Monospace", 9)
@@ -880,6 +1384,11 @@ class WireGLWidget(QOpenGLWidget):
         pr.setPen(QColor(0, 0, 0, 24))
         for yy in range(0, h_, 3):
             pr.drawLine(0, yy, w_, yy)
+
+        # ---- the market: blackhorse, reached through the gate on the wire ----
+        if self.market:
+            self._hud_market(pr, now)
+            return
 
         # ---- the open sea below the edge: unbounded, honest, carrying no data ----
         if self.deep is not None:
@@ -966,9 +1475,15 @@ class WireGLWidget(QOpenGLWidget):
                                     f"gates {src['gates']} · crows {src['crows']} · rifts {src['rifts']}")
         # controls
         pr.setPen(QColor(140, 150, 170))
-        pr.drawText(14, h_ - 56, "WASD move · drag / arrows look · E interact · Home surface · B rebuild · T real names")
+        if self.flying:
+            pr.drawText(14, h_ - 56, "FLIGHT · WASD glide (W/S follow your gaze) · Space up · C down · drag/arrows look · G land")
+        else:
+            pr.drawText(14, h_ - 56, "WASD move · drag / arrows look · E interact · G fly · Home surface · B rebuild · T real names")
         if self.show_real:
             pr.setPen(QColor(120, 230, 180)); pr.drawText(14, h_ - 40, "REAL NAMES: on")
+        if self.flying:
+            pr.setPen(QColor(150, 235, 210))
+            pr.drawText(w_ - 190, 88, "FLIGHT: on")
         # labels
         for (sx, sy, txt, col) in self._labels():
             if not (0 <= sx <= w_ and 0 <= sy <= h_):
@@ -1037,6 +1552,34 @@ class WireVisionTab(QWidget):
         rv.addWidget(QLabel("CODEX — the wire, translated"))
         self.codex = QTextBrowser(); self.codex.setOpenExternalLinks(False)
         rv.addWidget(self.codex, 1)
+        self.market_panel = QFrame(); self.market_panel.setVisible(False)
+        self.market_panel.setStyleSheet(
+            "QFrame#marketPanel{border:1px solid #2a4a55;border-radius:6px;background:#0b1418;}"
+            "QLabel{color:#cfe3dd;background:transparent;}"
+            "QPushButton{background:#12303a;border:1px solid #2a4a55;border-radius:4px;padding:3px;}")
+        self.market_panel.setObjectName("marketPanel")
+        mpl = QVBoxLayout(self.market_panel)
+        self.market_title = QLabel("BLACKHORSE \u2014 the market")
+        self.market_title.setStyleSheet("color:#8be0ff;font-weight:bold;")
+        self.market_balance = QLabel("balance: \u2014")
+        self.market_balance.setWordWrap(True)
+        self.market_status = QLabel("")
+        self.market_status.setWordWrap(True)
+        self.market_form = QWidget()
+        self._mform = QVBoxLayout(self.market_form)
+        self._mform.setContentsMargins(0, 0, 0, 0)
+        self.form_buttons = QHBoxLayout()
+        self.b_new_agent = QPushButton("New agent\u2026")
+        self.b_close_menu = QPushButton("Hide menu")
+        self.form_buttons.addWidget(self.b_new_agent)
+        self.form_buttons.addWidget(self.b_close_menu)
+        mpl.addWidget(self.market_title)
+        mpl.addWidget(self.market_balance)
+        mpl.addWidget(self.market_status)
+        mpl.addWidget(self.market_form)
+        mpl.addLayout(self.form_buttons)
+        rv.addWidget(self.market_panel)
+        self._menu_visible = False
         split.addWidget(right)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
@@ -1046,6 +1589,12 @@ class WireVisionTab(QWidget):
         self.cb_real.stateChanged.connect(self._toggle_real)
         self.gl.stratum_changed.connect(self._on_stratum)
         self.gl.request_rebuild.connect(self.build)
+        self.gl.market_opened.connect(self._on_market)
+        self.gl.market_closed.connect(self._on_market_closed)
+        self.gl.agent_selected.connect(self._open_editor)
+        self.gl.menu_toggle.connect(self._toggle_menu)
+        self.b_new_agent.clicked.connect(self._show_create)
+        self.b_close_menu.clicked.connect(lambda: self._set_menu(False))
         self._render_codex()
         # first build on the next event-loop turn so the widget is realized
         QTimer.singleShot(300, self.build)
@@ -1140,6 +1689,251 @@ class WireVisionTab(QWidget):
             rows.append(f"<b>{c.get('friendly','')}</b> = <i>{c.get('real','')}</i><br>"
                         f"<span style='color:#9aa'>{c.get('blurb','')}</span><br><br>")
         self.codex.setHtml("".join(rows))
+
+    def _on_market(self, w):
+        self._set_menu(True)
+        acc = (w or {}).get("account", {}) or {}
+        cash = acc.get("cash")
+        alloc = acc.get("allocated")
+        cur = acc.get("currency", "")
+        bal = f"cash {cash:g} {cur} \u00b7 allocated {alloc:g} \u00b7 equity~{acc.get('equity_est')}"
+        self.market_balance.setText("BLACKHORSE live balance:\n" + bal)
+        agent = None
+        if self.gl.selected_agent and w:
+            agent = next((a for a in w.get("agents", [])
+                          if a["id"] == self.gl.selected_agent), None)
+        if agent is not None:
+            self._open_editor(agent)
+        else:
+            self._menu_root(w)
+
+    def _on_market_closed(self):
+        self.market_panel.setVisible(False)
+        self._menu_visible = False
+        self._clear_form()
+        self.market_balance.setText("balance: \u2014")
+
+    def _toggle_menu(self, _flag):
+        if not self.gl.market:
+            return
+        self._set_menu(not self._menu_visible)
+
+    def _set_menu(self, on):
+        self._menu_visible = on
+        self.market_panel.setVisible(on and self.gl.market)
+
+    def _clear_form(self):
+        lay = self._mform
+        while lay.count():
+            it = lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _menu_root(self, w=None):
+        self._clear_form()
+        w = w or self.gl.market_world or {}
+        acc = w.get("account", {}) or {}
+        rows = [f"account \u00b7 {acc.get('mode', '?')} \u2014 "
+                f"{'LIVE' if acc.get('live') else 'paper'} (autonomous {acc.get('autonomous')})"]
+        rows.append(f"cash {acc.get('cash')} {acc.get('currency')} \u00b7 "
+                    f"allocated {acc.get('allocated')} \u00b7 "
+                    f"open positions {acc.get('open_positions')}")
+        rp = acc.get('realized_pnl')
+        if rp is not None:
+            rows.append(f"realized pnl {rp:g} \u00b7 closed {acc.get('closed')} "
+                        f"(w {acc.get('wins')} / l {acc.get('losses')})")
+        agents = w.get("agents", [])
+        rows.append("platforms (your trading agents):")
+        for a in agents:
+            st = MARKET_STATE_TXT.get(a["state"], a["state"])
+            net = f" \u00b7 net {a['net_pct']}%" if a.get("net_pct") is not None else ""
+            rows.append(f"  \u2022 {a['name']} [{st}]{net}")
+        if not agents:
+            rows.append("  (none yet \u2014 create one below)")
+        lbl = QLabel("<br>".join(rows))
+        lbl.setWordWrap(True)
+        self._mform.addWidget(lbl)
+
+    def _agent_doc(self, aid):
+        try:
+            doc = wiregate._load_json(wiregate.AGENTS_JSON, {"agents": {}})
+            return doc.get("agents", {}).get(aid), doc
+        except Exception:
+            return None, {}
+
+    def _open_editor(self, a):
+        self._clear_form()
+        aid = a["id"]
+        cur_agent, doc = self._agent_doc(aid)
+        profs = dict(wiregate.PROFILES or {})
+        prof_name = (cur_agent or {}).get("profile") or a.get("profile") or "slow"
+        prof = profs.get(prof_name) or {}
+        ov = dict(((cur_agent or {}).get("policy_overrides") or {}))
+        self._ctx = {"aid": aid, "ov": ov, "cur": cur_agent or {}}
+        t = QLabel(f"EDIT \u2014 {a['name']} <span style='color:#8be0ff'>({aid})</span> "
+                   f"<span style='color:#9aa'>\u00b7 {a.get('mode', '?')}</span>")
+        t.setWordWrap(True)
+        self._mform.addWidget(t)
+        self._ed_enabled = QCheckBox("enabled (will trade with live capital)")
+        self._ed_enabled.setChecked(bool((cur_agent or {}).get("enabled", a.get("enabled"))))
+        self._mform.addWidget(self._ed_enabled)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("capital"))
+        self._ed_capital = QDoubleSpinBox()
+        self._ed_capital.setRange(0, 100000); self._ed_capital.setDecimals(1)
+        self._ed_capital.setValue(float((cur_agent or {}).get("capital", a.get("capital") or 0)))
+        row.addWidget(self._ed_capital, 1)
+        self._mform.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("profile"))
+        self._ed_profile = QComboBox()
+        for k, v in profs.items():
+            self._ed_profile.addItem(v.get("label") or k, k)
+        idx = self._ed_profile.findData(prof_name)
+        if idx >= 0:
+            self._ed_profile.setCurrentIndex(idx)
+        row.addWidget(self._ed_profile, 1)
+        self._mform.addLayout(row)
+        d = QLabel(prof.get("description") or "")
+        d.setWordWrap(True); d.setStyleSheet("color:#9aa;")
+        self._mform.addWidget(d)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("pairs"))
+        self._ed_pairs = QListWidget(); self._ed_pairs.setMaximumHeight(72)
+        have = set((cur_agent or {}).get("pairs", a.get("pairs") or []))
+        for p in wiregate.PAIRS:
+            item = QListWidgetItem(p)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if p in have
+                               else Qt.CheckState.Unchecked)
+            self._ed_pairs.addItem(item)
+        row.addWidget(self._ed_pairs, 1)
+        self._mform.addLayout(row)
+        over_row = QLabel("<b>policy overrides</b> (blank values = use the profile)")
+        over_row.setStyleSheet("color:#cbb;")
+        self._mform.addWidget(over_row)
+        self._ed_ov = {}
+        base = prof.get("policy") or {}
+        for k, (kind, lo, hi) in (wiregate.EDITABLE or {}).items():
+            if k == "channels":
+                continue
+            if kind == "num":
+                row = QHBoxLayout()
+                row.addWidget(QLabel(k))
+                sb = QDoubleSpinBox()
+                sb.setRange(lo, hi)
+                sb.setDecimals(2 if hi <= 10 else 1)
+                v = ov.get(k) if k in ov else None
+                val = float(v) if v is not None else float(base.get(k, lo))
+                sb.setValue(val)
+                if k not in ov:
+                    sb.setSpecialValueText(f"profile ({base.get(k, '?')})")
+                    sb.setMinimum(min(lo, float(base.get(k, lo)) if base.get(k) is not None else lo))
+                row.addWidget(sb, 1)
+                self._mform.addLayout(row)
+                self._ed_ov[k] = sb
+            else:
+                cb = QCheckBox(k)
+                v = ov.get(k) if k in ov else None
+                cb.setChecked(bool(v) if v is not None else bool(base.get(k)))
+                self._ed_ov[k] = cb
+                self._mform.addWidget(cb)
+        save = QPushButton("Save settings")
+        save.clicked.connect(self._do_save)
+        back = QPushButton("Back to market")
+        back.clicked.connect(lambda: self._menu_root(self.gl.market_world))
+        hb = QHBoxLayout()
+        hb.addWidget(save); hb.addWidget(back)
+        self._mform.addLayout(hb)
+
+    def _do_save(self):
+        ctx = getattr(self, "_ctx", {})
+        aid = ctx.get("aid")
+        if not aid or not hasattr(self, "_ed_ov"):
+            return
+        overrides = {}
+        for k, w in self._ed_ov.items():
+            if isinstance(w, QDoubleSpinBox):
+                if w.specialValueText() and w.value() <= w.minimum():
+                    overrides[k] = None
+                else:
+                    overrides[k] = w.value()
+            else:
+                overrides[k] = w.isChecked()
+        overrides = {k: v for k, v in overrides.items() if v is not None}
+        pairs = [self._ed_pairs.item(i).text() for i in range(self._ed_pairs.count())
+                 if self._ed_pairs.item(i).checkState() == Qt.CheckState.Checked]
+        res = wiregate.apply_settings(
+            aid,
+            enabled=self._ed_enabled.isChecked(),
+            capital=self._ed_capital.value(),
+            profile=self._ed_profile.currentData(),
+            pairs=pairs,
+            overrides=overrides)
+        self._after_write(res)
+
+    def _show_create(self):
+        self._clear_form()
+        t = QLabel("NEW AGENT \u2014 a platform appears on the floor")
+        self._mform.addWidget(t)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("name (optional)"))
+        self._cr_name = QLineEdit()
+        row.addWidget(self._cr_name, 1)
+        self._mform.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("profile"))
+        self._cr_profile = QComboBox()
+        for k, v in (wiregate.PROFILES or {}).items():
+            self._cr_profile.addItem(v.get("label") or k, k)
+        row.addWidget(self._cr_profile, 1)
+        self._mform.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("capital"))
+        self._cr_capital = QDoubleSpinBox()
+        self._cr_capital.setRange(0, 100000); self._cr_capital.setDecimals(1)
+        row.addWidget(self._cr_capital, 1)
+        self._mform.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("pairs"))
+        self._cr_pairs = QListWidget(); self._cr_pairs.setMaximumHeight(72)
+        for p in wiregate.PAIRS:
+            item = QListWidgetItem(p)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if p == "DOT/USD"
+                               else Qt.CheckState.Unchecked)
+            self._cr_pairs.addItem(item)
+        row.addWidget(self._cr_pairs, 1)
+        self._mform.addLayout(row)
+        make = QPushButton("Create agent")
+        make.clicked.connect(self._do_create)
+        back = QPushButton("Back to market")
+        back.clicked.connect(lambda: self._menu_root(self.gl.market_world))
+        hb = QHBoxLayout()
+        hb.addWidget(make); hb.addWidget(back)
+        self._mform.addLayout(hb)
+
+    def _do_create(self):
+        pairs = [self._cr_pairs.item(i).text() for i in range(self._cr_pairs.count())
+                 if self._cr_pairs.item(i).checkState() == Qt.CheckState.Checked]
+        res = wiregate.create_agent(
+            self._cr_profile.currentData(),
+            self._cr_capital.value(),
+            name=self._cr_name.text().strip(),
+            pairs=pairs)
+        self._after_write(res)
+
+    def _after_write(self, res):
+        if not res.get("ok"):
+            self.market_status.setText(f"\u2716 {res.get('error')}")
+            self.gl._flash(f"not saved \u2014 {res.get('error')}", 5.0)
+            return
+        self.market_status.setText(
+            f"\u2713 saved \u00b7 {res.get('name')} ({res.get('agent')})")
+        self.gl._flash(f"saved \u00b7 {res.get('name')} {res.get('capital')} "
+                       f"enabled={bool(res.get('enabled'))}", 3.0)
+        self.gl.refresh_market()
 
     def shutdown(self):
         self.gl.shutdown()

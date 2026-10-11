@@ -1,6 +1,6 @@
 # MR.FLUFFY — Conversation Snapshot
 
-> Span: **2026-10-09 → 2026-10-10** (the rebuilt Mr.Fluffy, two channels + a place).
+> Span: **2026-10-09 → 2026-10-11** (the rebuilt Mr.Fluffy, two channels + a place).
 > Mr.Fluffy lives in `~/mrfluffy`. It is not one feed: it is **two separate
 > readouts** (news reader, wire king) plus a third surface, **Wire Vision** — a
 > low-poly place built only from the wire channel's own local ground truth.
@@ -82,14 +82,53 @@ into a true GitS descent and made honest:
 - `AGENTS.md` + `wirevision.py` codex/memory updated to match. Verified under
   Xvfb: all six strata render, the dive completes, deep never bottoms out.
 
-## Current state (end of 2026-10-10)
+### 5. The market — a gate into BlackHorse (2026-10-11)
+User: *"add a gate to the wire that leads into 'blackhorse' — a trading market…
+steps inside the gate connect to an 'online game'… users can see each other's
+characters… floating platforms (only the user's OWN agents under them)… flying to
+a platform and stepping on it opens a panel to edit that agent's trading
+settings… also a menu floating which we can hide that brings up the agent
+creation and the balance in the account."* Findings + build:
+- BlackHorse is **LIVE with real money** (`config/trading.json` mode=LIVE,
+  autonomous=true): account cash 29.22 USD, ~69.74 allocated, agents agent_1 +
+  agent_6 enabled and waiting to sell, the rest off. No network-facing server
+  existed, so a tiny **presence relay** (`wiregate.Presence`) was built.
+- New `wiregate.py`: the blackhorse market model + the online layer + **gated
+  writes**. CLI: `python3 wiregate.py [--summary|--create|--set|--serve]`.
+  Reads read blackhorse's files straight; writes back up `agents.json` first
+  (`agents.json.bak.<stamp>`), take an `fcntl` write lock, validate against the
+  editable keys + the blackhorse registry's PROFILES, and reject capital
+  over-allocation vs the treasury.
+- Presence relay on 127.0.0.1:17833 (stdlib ThreadingHTTPServer): `/ping`,
+  `/peers`, `/pose`, `/leave`; peers expire after 12s; `MRFLUFFY_WIRE_USER`
+  names you; `MRFLUFFY_GATE_URL` overrides the relay base. Debugged: `peers()`
+  once read the client's own empty map instead of the relay — now fetches
+  `/peers` and filters self, verified green with two clients.
+- `wiregame.py` grew the market scene: a gate on the LAN floor by the well
+  (`[E]` beside it opens the market), dark disc floor at `MARKET_FLOOR_Y=-80.0`,
+  a centre account column breathing with the loop heartbeat, one floating pad per
+  trading agent (colour = buy/sell/selling/off, pulsing + selection ring), the
+  return gate, and other users' characters drawn from the relay. HUD shows
+  account cash/allocated, loop decision, online/alone, legend + the honesty line.
+  Keys: `E` step/settings, `B` rebuild market, `H` hide/show the market menu,
+  `Home` leave the market.
+- `WireVisionTab` gained the floating market panel (hidden by default): live
+  balance, a per-agent editor (capital, enabled, profile, pairs, policy
+  overrides) and a New-agent form — every Save/Create is an explicit gated write.
+- Verified headless under Xvfb: world builds, market opens from snapshot (5
+  agents, cash 29.22), landing on a pad selects the agent, E opens the editor,
+  H toggles the menu, a second relay user appears as a peer, labels render, Home
+  leaves, and no config was touched (disk untouched during the smoke test).
 
-- `wirevision.py` / `wiregame.py` untracked; `AGENTS.md` + `app.py` modified;
-  last commit on `master`: *"mrfluffy: split into two channels — the news reader
-  and the wire king."*
-- Raven (the separate `~/raven` lab assistant) was shut down by the user via its
-  GUI; Mr.Fluffy files were left untouched, and Wire Vision never touches raven
-  or the network.
+## Current state (end of 2026-10-11)
+
+- `wiregame.py` modified + `wiregate.py` new (untracked); `AGENTS.md` +
+  `SNAPSHOT.md` updated. Last commit on `master`: *"mrfluffy: add Wire Vision —
+  walk the wire (LAN -> protocol strata -> the endless dive)"* (8dc7929). Raven
+  was committed and snapshotted separately (e4eef00 → `fakegit/ravenv1.5`); the
+  raven fakegit work is done and raven is no longer open here.
 - Open threads: (a) make the amber reticle lock/label the nearest real object in
-  3D; (b) keep polishing the endless dive. House rules stand: ground truth only,
-  no invented data, flavour not story.
+  3D; (b) polish the market (platform spacing, crowd density, a sounding bell at
+  the centre column — all dressing on top of the real snapshot). House rules
+  stand: ground truth only, no invented data, flavour not story; the market's
+  platforms/balance/crowd are real, the floor and colours are dressing.

@@ -83,6 +83,37 @@ one. A **sources** list names each local file the world is built from, marks it
 fresh or stale, and says what would refresh it (run dye, fly a crow) — without
 running anything itself.
 
+## The market (a gate into blackhorse, reached from the wire floor)
+
+A grown-up game inside the wire: on the LAN floor by the well stands a tall dark
+portal — **the gate to BlackHorse**, and `E` beside it opens **the market**, a
+trading floor entered from the wire. Files: `wiregate.py` (the market model +
+the presence relay + gated writes), the rest lives in `wiregame.py`.
+
+- The market is a place **made from blackhorse's own files** (`wiregate.snapshot()`
+  reads `config/agents.json`, `config/treasury.json`, `config/trading.json`,
+  `logs/portfolio.json`, `logs/exit_watch.json`, `logs/loop_state.json`). It never
+  calls the exchange and never trades — it re-reads the files, so `B` rebuilds it.
+- Your **floating platforms** are the trading agents: one platform per agent.
+  Green pad = flat & waiting to buy, red = in a position & waiting to sell,
+  pulsing red = blackhorse's exit_watch has flagged `SELL`, dim = disabled. Fly to
+  a pad (WSAD fly, Space/C up/down), land on it, and `[E]` opens a panel to edit
+  that agent's trading settings (capital, enabled, profile, pairs, policy
+  overrides) or to create a brand-new agent.
+- **TWO kinds of people are on the floor and both are real.** Your own platforms
+  are YOUR trading agents. The other bodies are other users connected to the
+  presence relay (`wiregate.Presence`, stdlib HTTP on 127.0.0.1:17833, identity
+  from `MRFLUFFY_WIRE_USER`) — you announce your pose and see theirs. No fake
+  characters, ever.
+- **Writes are gated and real money is at stake.** BlackHorse is a live trader.
+  Editing/creating an agent writes to `config/agents.json` only after: a
+  timestamped `agents.json.bak.<stamp>` backup, an `fcntl` write lock, and a
+  capital over-allocation check against the treasury. The glass never writes on
+  its own — only when you press Save/Create.
+- Same honesty rule as the dive, made plain in the HUD: platforms/balance/crowd
+  are **real**; the floor, the columns and the colours are **dressing**, and green
+  /red are just a read of the files.
+
 ## Rules both channels share
 * You have **no tools**. Do NOT run any tool, do NOT open or search for any file —
   everything you need is inlined in your prompt.
