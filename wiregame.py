@@ -925,9 +925,8 @@ class WireGLWidget(QOpenGLWidget):
         super().keyReleaseEvent(e)
 
     def wheelEvent(self, e):
-        if self.word and self.word_mode == "ayah":
-            self._word_move(1 if e.angleDelta().y() < 0 else -1)
-            return
+        # the wheel no longer travels the ayah — use the next/prev buttons, the
+        # [ ] keys, or the gates. Scrolling stays out of the reading.
         super().wheelEvent(e)
 
     def mousePressEvent(self, e):
@@ -1307,7 +1306,7 @@ class WireGLWidget(QOpenGLWidget):
         self.word_changed.emit()
 
     def _word_move(self, d):
-        """[ ] / scroll — travel ayah by ayah; the end returns to the chapters."""
+        """[ ] — travel ayah by ayah; the end returns to the chapters."""
         if not self.word or self.word_mode != "ayah" or not self.word_ref:
             return
         num, idx = self.word_ref
@@ -2348,13 +2347,9 @@ class WireGLWidget(QOpenGLWidget):
                              int(col[2] * 255), 225))
             pr.drawText(int(sx) + 6, int(sy), txt)
 
-        # ---- reticle + prompt at whatever you are standing in ----
+        # ---- prompt at whatever you are standing in. No centre reticle here:
+        #      the Word room is for reading, and the words must not be boxed in. ----
         n0 = self._nearest()
-        ccx, ccy = w_ // 2, h_ // 2
-        pr.setPen(QPen(QColor(255, 185, 40, 235) if n0 else QColor(120, 230, 180, 190), 2))
-        for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
-            pr.drawLine(ccx + dx * 18, ccy + dy * 18, ccx + dx * 18 + dx * 12, ccy + dy * 18)
-            pr.drawLine(ccx + dx * 18, ccy + dy * 18, ccx + dx * 18, ccy + dy * 18 + dy * 12)
         pr.setFont(mono)
         fm = pr.fontMetrics()
         if n0:
@@ -2376,8 +2371,11 @@ class WireGLWidget(QOpenGLWidget):
                 prompt = ""
             if prompt:
                 pr.setPen(QColor(255, 215, 120))
-                tw = fm.horizontalAdvance(prompt)
-                pr.drawText((w_ - tw) // 2, ccy + 46, prompt)
+                if self.word_mode == "ayah":
+                    pr.drawText(14, h_ - 134, prompt)      # out of the reading column
+                else:
+                    tw = fm.horizontalAdvance(prompt)
+                    pr.drawText((w_ - tw) // 2, h_ // 2 + 46, prompt)
         if self._hud_msg and now < self._hud_until:
             pr.setPen(QColor(120, 230, 180))
             tw = fm.horizontalAdvance(self._hud_msg)
@@ -2391,7 +2389,7 @@ class WireGLWidget(QOpenGLWidget):
         # whole ayah to fit, whatever its length (some verses are very long)
         bottom_cap = h_ - 132
         band_h = max(170, min(bottom_cap - 60, int(h_ * 0.62)))
-        pr.fillRect(x0, 60, x1 - x0, band_h, QColor(4, 10, 16, 150))
+        pr.fillRect(x0, 60, x1 - x0, band_h, QColor(4, 10, 16, 190))
         pr.setPen(QColor(70, 120, 132))
         pr.drawRect(x0, 60, x1 - x0, band_h)
         # reference line
@@ -2454,8 +2452,9 @@ class WireGLWidget(QOpenGLWidget):
                     "the Qur'an. Seek a teacher, and the tafsir, for understanding.")
         pr.setPen(QColor(140, 175, 190))
         pr.drawText(14, h_ - 66,
-                    "WASD fly \u00b7 Space/C up/down \u00b7 [ ] or scroll travel the ayah "
-                    "\u00b7 E at a gate \u00b7 R the chapters \u00b7 Home leave the room")
+                    "WASD fly \u00b7 Space/C up/down \u00b7 [ ] travel the ayah "
+                    "\u00b7 or the next / prev buttons \u00b7 E at a gate "
+                    "\u00b7 R the chapters \u00b7 Home leave the room")
 
     def _hud_word_select(self, pr, now, w_, h_):
         """The cluster of chapters: the whole Book, hung like stars to fly to."""

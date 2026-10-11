@@ -183,7 +183,7 @@ local copy) + `quran.py` (opens it) + `quranworld.py` (the motif engine) +
   so the same verse always yields the same world. The recipe keys abstract,
   low-poly forms and a palette to the **images named in the verse** (time, dawn,
   loss, refuge, light, a path, abundance, the whisper...). Gates lead on: next
-  ayah (`E`, or `[`/`]`/wheel anywhere), previous ayah, and back to the cluster
+  ayah (`E`, or `[`/`]` anywhere), previous ayah, and back to the cluster
   of chapters. At a chapter's end, "next" returns you to the chapters.
 - **The words are written on the sky.** In an ayah world the authentic Arabic is
   shown centred at the top of the sky, with the transliteration and the translation

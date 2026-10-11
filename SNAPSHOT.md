@@ -218,7 +218,7 @@ travel through or exit back to the chapters."*
 - **Two rooms.** Entering Learn Islam now opens a **hall of chapters** (six
   surah portals on a ring + one bright random-chapter gate). `E` opens the
   chapter's first ayah; `R` opens a random chapter at its first ayah. Each ayah
-  opens its own generated world. Gates: next ayah (`E`, or `[`/`]`/wheel
+  opens its own generated world. Gates: next ayah (`E`, or `[`/`]`
   anywhere), previous ayah, back to the chapters. At a chapter's end, "next"
   returns to the chapters.
 - **Words on the sky.** In an ayah world the Arabic is shown large at the top of
@@ -283,18 +283,29 @@ travel through or exit back to the chapters."*
   prev/next/chapters/random/leave; a chapter list click opens the surah's first
   ayah; opening surah 2 (286 ayahs) and travelling works; rendering 2:282 works.
 
+### 12. Reading the ayah, uninterrupted (2026-10-11)
+
+- The centre **reticle was removed from the Word room** (the wire and market keep
+  theirs) — it sat over the reading and made the English hard to read. The
+  interaction prompt moved out of the reading column (left margin in an ayah,
+  below the title in the chapter room), and the reading panel was deepened
+  (alpha 150 → 190) so the translation stands out over the world.
+- **The mouse wheel no longer travels the ayah.** With the next/prev buttons, the
+  `[`/`]` keys and the gates all present, scrolling only got in the way; it is now
+  left to the page. The HUD control line was updated to match.
+
 ## Current state (end of 2026-10-11)
 
 - `wiregame.py` modified for the ayah engine (word room), again for full screen +
-  the star-cluster chapter sky, and again for the whole-Qur'an cluster, the
-  full-screen exit overlay, and the quick-travel bar; `app.py` modified for
-  full-screen chrome hiding; `quranworld.py` new; `quran.py` rewritten to open the
-  data; `quran_data.json` (all 114 surahs) and `fetch_quran.py` new.
-  `AGENTS.md` + `SNAPSHOT.md` updated with these sections.
-- Uncommitted work in the tree: the ayah engine (section 9), full screen +
-  star-cluster (section 10), and this whole-Qur'an + exit/quick-travel work
-  (section 11) are not yet committed; the last snapshot
-  `~/fakegit/mrfluffyv1.7` is at commit `fb69f18`, behind them.
+  the star-cluster chapter sky, again for the whole-Qur'an cluster, the
+  full-screen exit overlay, and the quick-travel bar, and again for the
+  reading/scroll fixes; `app.py` modified for full-screen chrome hiding;
+  `quranworld.py` new; `quran.py` rewritten to open the data; `quran_data.json`
+  (all 114 surahs) and `fetch_quran.py` new. `AGENTS.md` + `SNAPSHOT.md` updated
+  with these sections.
+- Committed `9fe2ac7` (whole Qur'an + full-screen exit + quick travel), snapshot
+  `~/fakegit/mrfluffyv1.8`. The reading/scroll fixes (section 12) are uncommitted
+  on top.
 - Open threads: (a) make the amber reticle lock/label the nearest real object in
   3D; (b) polish the market further (crowd density, a sounding bell at the centre
   column, the gate glow — all dressing on top of the real snapshot); (c) optionally
