@@ -387,6 +387,58 @@ travel through or exit back to the chapters."*
   packet replay; offscreen paint exercises the tablet-label projection. Market / word /
   deep untouched.
 
+### 16. The machine world — Phase 0: the box under your feet (2026-10-11)
+
+- **The ask, and the line drawn first.** The user wanted the wire birds (crow/raven/
+  finch) to do *real attacking*, and to "go through any wall while traveling the net"
+  for "whitehat defense." Declined: turning Mr.Fluffy into an offensive/penetration
+  tool — bruteforce, payloads, hack-back/retaliation — is building intrusion
+  capability against other hosts, and retaliation on a spoofed source burns innocents.
+  The house rule stands (`wireout.py:60`): a wire move is a passive, local,
+  lab-authorized observation, never an attack on a remote host.
+- **The agreed pivot — a local, defensive machine world.** Travel through **THIS**
+  machine as a place: intruders as **dark figures** in the field; crow/finch flying out
+  to do defense (auto **and** a manual "send the birds" menu); and an **x-ray** to see
+  through walls to the door/service an intruder has touched. Everything local and
+  defensive; no attack ever leaves the box; the x-ray shows where an intruder has
+  *touched*, not their intent (labelled observed vs inferred).
+- **Phase 0 DONE — `machinevision.py` (new).** Mirrors `wirevision.py` but points at the
+  box under your feet. Reads **THIS host live** from `/proc` (`net/tcp`,`tcp6`,`udp`,
+  `udp6`, per-pid `fd`→inode→pid, `comm`/`cmdline`/`status`/`exe`), `/etc/passwd`,
+  `/sys/class/net`, `/proc/uptime`+`osrelease`, plus raven's own local logs
+  (`/tmp/ravenheart/state.json`+`events.log`, `~/raven/ids/eve.json`,
+  `~/raven/dye/contacts.json`, `~/raven/{finch,shield}/baseline.json`). It produces:
+  **doors** (listening sockets + owning program), **roads** (live connections, inbound
+  flagged), **inhabitants** (processes standing at sockets), **users**, **lifeline**
+  read, and **dark figures** (intruders) *only* from local defensive evidence —
+  lifeline strikes/guard acts, hostile lines in `events.log` that name a source,
+  Suricata alerts, and public inbound roads (the last marked **inferred**).
+- **Honesty rules baked in:** a `CRIT` lifeline blip ("no default route") is **not** a
+  figure; an event must name a source IP/MAC to become a figure; the lifeline `strikes`/
+  `guard.acts` counter is its own figure; the connection-table inbound is the weakest
+  sort and says so. Touches no network, sends no packet, runs no tool, calls no model.
+  CLI: `python3 machinevision.py --summary` (or bare, for JSON).
+- **Verified** on this box: 4 doors (`opencode :4199`, `ollama :11434`, two UDP), 6
+  roads (all outbound), 3 inhabitants, **0 dark figures** (nothing in the local logs is
+  striking), 60 users (system accounts), JSON-serializable, summary renders clean.
+
+- **EXACTLY WHERE WE LEFT OFF.** Phase 0 is committed as this snapshot. **Phase 1 — the
+  machine world in the renderer — is NOT started.** The last thing outstanding is one
+  design choice: *how the machine world is entered in Wire Vision.* The user was asked
+  and instead answered **"save snapshot, add note exactly where we left off."**
+  - **Open decision (Phase 1, first thing to resolve):** entry point — (a) a **hatch on
+    the wire floor due +z** (the one free plaza wedge; market is +x, Word −x, the pier
+    −z) reached with `E` and left with `Home` *(recommended, mirrors market/Word/
+    exchange)*; (b) a **button in the Vision tab bar**; or (c) **both**.
+  - **Phase 1:** a "machine" room in `wiregame.py` — render doors/roads/inhabitants from
+    `machinevision.build()`, dark figures for intruders, and the **x-ray** toggle that
+    reveals (through walls) the door a figure has touched.
+  - **Phase 2:** bird dispatch — **crow** = evidence/recon (read-only), **finch** =
+    quarantine/contain (local), **raven** = scope gate; auto-response + a manual
+    "send the birds out" menu.
+  - **Phase 3:** the auto-defend engine — detect → contain **on this host only** (host
+    firewall block / quarantine), logged, scope-gated. No packet aimed at anyone else.
+
 ## Current state (end of 2026-10-11)
 
 - `wiregame.py` modified for the ayah engine (word room), again for full screen +
@@ -403,6 +455,11 @@ travel through or exit back to the chapters."*
 - Committed `9a4c9b1` (build the Exchange + DuckDuckGo), snapshot
   `~/fakegit/mrfluffyv1.11` = `9a4c9b1`; `7029213` = v1.10. The packet-theatre work
   (section 15) is on top.
+- **Machine world (section 16) — Phase 0 only.** `machinevision.py` **new** (a local,
+  defensive model of THIS host from `/proc` + raven's logs; 0 dark figures right now).
+  `wiregame.py` is **not** yet touched. Next thing to do: pick the **Phase 1 entry
+  point** (hatch on the wire floor due +z / a Vision-tab button / both), then render
+  the machine room + dark figures + the x-ray.
 - Open threads: (a) more gates on the Exchange ring (the hall is built for a
   crowd of services — a search is the first); (b) make the amber reticle
   lock/label the nearest real object in 3D; (c) polish the market further (crowd
