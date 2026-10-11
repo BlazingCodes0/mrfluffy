@@ -50,7 +50,8 @@ WORD_GATE_POS = [-23.0, 0.06, 0.0]
 WORD_FLOOR_Y = -66.0
 WORD_R = 30.0
 WORD_RETURN_POS = [0.0, WORD_FLOOR_Y + 6.0, WORD_R - 7.0]   # gate back to the wire
-WORD_CLUSTER_R = 21.0        # radius of the sphere of chapter-stars you fly between
+WORD_CLUSTER_R = 26.0        # the stars are scattered through a tall volume of sky
+WORD_CLUSTER_TOP = WORD_FLOOR_Y + 56.0   # highest a chapter-star hangs
 WORD_NEXT_ANGLE = 0.0        # gate to the next ayah, due +x
 WORD_PREV_ANGLE = math.pi * 0.5   # gate to the previous ayah
 WORD_BACK_ANGLE = math.pi    # gate back to the chapters
@@ -198,6 +199,8 @@ class WireGLWidget(QOpenGLWidget):
         self._word_reci = None           # the recipe of the current ayah world
         self._word_suras = []
         self._word_stars = None          # lazily-built decorative star field
+        self._word_cluster = None        # lazily-built scatter of chapter-stars
+        self._word_cluster_n = -1
         self._last_t = time.time()
         self._hud_msg = ""
         self._hud_until = 0.0
@@ -1245,17 +1248,32 @@ class WireGLWidget(QOpenGLWidget):
                 return s
         return None
 
+    def _word_chapter_points(self, n):
+        """Scatter the n chapter-stars through a tall cylinder of sky with a
+        best-candidate (blue-noise) spread — the same sky every time, but wide
+        and far apart, so you fly a little adventure between chapters."""
+        if self._word_cluster is None or self._word_cluster_n != n:
+            rnd = random.Random(20261011)
+            y0, y1 = WORD_FLOOR_Y + 5.0, WORD_CLUSTER_TOP
+            pts = []
+            for _ in range(n):
+                best, bd = None, -1.0
+                for _ in range(40):
+                    a = rnd.uniform(0.0, 2.0 * math.pi)
+                    r = WORD_CLUSTER_R * math.sqrt(0.12 + 0.88 * rnd.random())
+                    p = (r * math.cos(a), rnd.uniform(y0, y1), r * math.sin(a))
+                    d = min((math.dist(p, q) for q in pts), default=1e9)
+                    if d > bd:
+                        bd, best = d, p
+                pts.append(best)
+            self._word_cluster = pts
+            self._word_cluster_n = n
+        return self._word_cluster
+
     def _word_chapter_pos(self, i, n):
-        """Where chapter i hangs among the stars — a golden-angle spread over a
-        sphere shell, so the cluster always looks like the same sky and you fly
-        from star to star to reach a chapter."""
-        ga = 2.399963229728653               # the golden angle
-        yf = (i + 0.5) / max(1, n)
-        y = WORD_FLOOR_Y + 6.0 + 26.0 * yf
-        rr = math.sqrt(max(0.0, 1.0 - (2.0 * yf - 1.0) ** 2))
-        a = i * ga
-        R = WORD_CLUSTER_R
-        return (R * rr * math.cos(a), y, R * rr * math.sin(a))
+        """Where chapter i hangs among the stars (a fixed scatter, cached)."""
+        pts = self._word_chapter_points(n)
+        return pts[i % len(pts)]
 
     def _word_random_pos(self):
         return (0.0, WORD_FLOOR_Y + 20.0, 0.0)
@@ -1265,10 +1283,10 @@ class WireGLWidget(QOpenGLWidget):
         if self._word_stars is None:
             rnd = random.Random(20261011)
             pts = []
-            for _ in range(280):
+            for _ in range(360):
                 a = rnd.random() * 2 * math.pi
-                rr = (WORD_R - 3.0) * math.sqrt(rnd.random())
-                y = WORD_FLOOR_Y + 1.5 + rnd.random() * 46.0
+                rr = (WORD_R - 2.0) * math.sqrt(rnd.random())
+                y = WORD_FLOOR_Y + 1.5 + rnd.random() * 58.0
                 pts.append((rr * math.cos(a), y, rr * math.sin(a),
                             rnd.random() * 6.283, 0.6 + rnd.random() * 1.6))
             self._word_stars = pts

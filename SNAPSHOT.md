@@ -285,6 +285,13 @@ travel through or exit back to the chapters."*
 
 ### 12. Reading the ayah, uninterrupted (2026-10-11)
 
+- **The chapters were scattered wide.** The 114 chapter-stars no longer sit close
+  on a sphere shell; they are spread through a tall volume of sky (radius
+  `WORD_CLUSTER_R` = 26, heights `WORD_FLOOR_Y+5` … `WORD_CLUSTER_TOP`, i.e. ~51
+  units tall) using a fixed **best-candidate (blue-noise)** scatter
+  (`_word_chapter_points`, cached; closest pair ≈ 7.9 units, well clear of the
+  6.0 pick radius). Same sky every time, but you now fly a real little adventure
+  between chapters.
 - The centre **reticle was removed from the Word room** (the wire and market keep
   theirs) — it sat over the reading and made the English hard to read. The
   interaction prompt moved out of the reading column (left margin in an ayah,
@@ -298,14 +305,15 @@ travel through or exit back to the chapters."*
 
 - `wiregame.py` modified for the ayah engine (word room), again for full screen +
   the star-cluster chapter sky, again for the whole-Qur'an cluster, the
-  full-screen exit overlay, and the quick-travel bar, and again for the
-  reading/scroll fixes; `app.py` modified for full-screen chrome hiding;
-  `quranworld.py` new; `quran.py` rewritten to open the data; `quran_data.json`
-  (all 114 surahs) and `fetch_quran.py` new. `AGENTS.md` + `SNAPSHOT.md` updated
-  with these sections.
-- Committed `9fe2ac7` (whole Qur'an + full-screen exit + quick travel), snapshot
-  `~/fakegit/mrfluffyv1.8`. The reading/scroll fixes (section 12) are uncommitted
-  on top.
+  full-screen exit overlay, and the quick-travel bar, again for the
+  reading/scroll fixes, and again to scatter the chapters wide; `app.py`
+  modified for full-screen chrome hiding; `quranworld.py` new; `quran.py`
+  rewritten to open the data; `quran_data.json` (all 114 surahs) and
+  `fetch_quran.py` new. `AGENTS.md` + `SNAPSHOT.md` updated with these sections.
+- Committed `7bce637` (reading/scroll fixes, section 12) on top of `9fe2ac7`
+  (whole Qur'an + full-screen exit + quick travel); snapshot `~/fakegit/mrfluffyv1.9`
+  = `7bce637`. The scatter-the-chapters-wide change (section 12, first bullet) is
+  uncommitted on top.
 - Open threads: (a) make the amber reticle lock/label the nearest real object in
   3D; (b) polish the market further (crowd density, a sounding bell at the centre
   column, the gate glow — all dressing on top of the real snapshot); (c) optionally
