@@ -100,6 +100,14 @@ the presence relay + gated writes), the rest lives in `wiregame.py`.
   a pad (WSAD fly, Space/C up/down), land on it, and `[E]` opens a panel to edit
   that agent's trading settings (capital, enabled, profile, pairs, policy
   overrides) or to create a brand-new agent.
+- The platforms are dressed up to the wire home's standard (halo, lit hex plinth,
+  scalloped sigil pad, beacon of light, twin gems; the loop runs a pulse of light
+  out to each pad), but that is strictly dressing — the labels and green/red are
+  the real snapshot, tinted.
+- The agent settings **panel floats over the world** (a sibling of the GL view,
+  translucent, rounded, with an **✕** in its corner — H also toggles it), so
+  editing an agent never pops a separate window or breaks the view: the market
+  stays visible behind the panel.
 - **TWO kinds of people are on the floor and both are real.** Your own platforms
   are YOUR trading agents. The other bodies are other users connected to the
   presence relay (`wiregate.Presence`, stdlib HTTP on 127.0.0.1:17833, identity

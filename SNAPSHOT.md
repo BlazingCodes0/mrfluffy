@@ -154,12 +154,13 @@ relay, all stdlib, all tested:
 
 ## Current state (end of 2026-10-11)
 
-- `wiregame.py` modified + `wiregate.py` new (untracked); `AGENTS.md` +
-  `SNAPSHOT.md` updated. Last commit on `master`: *"mrfluffy: add the market —
-  a BlackHorse gate inside the wire"* (142089c).
+- `wiregame.py` modified (platforms re-dressed + panel is now an in-world
+  overlay) + `wiregate.py` new (untracked); `AGENTS.md` + `SNAPSHOT.md` updated.
+  Last commit on `master`: *"mrfluffy: seal the wire — a ghost layer encrypts +
+  signs traffic, a ward turns away abuse"* (ee99f51).
 - Open threads: (a) make the amber reticle lock/label the nearest real object in
-  3D; (b) polish the market (platform spacing, crowd density, a sounding bell at
-  the centre column — all dressing on top of the real snapshot); (c) optionally
+  3D; (b) polish the market further (crowd density, a sounding bell at the centre
+  column, the gate glow — all dressing on top of the real snapshot); (c) optionally
   switch the relay to real TLS later (the ghost weave is stdlib-protected, honest
   about being a weave, not a vow). House rules stand: ground truth only, no
   invented data, flavour not story; the market's platforms/balance/crowd are

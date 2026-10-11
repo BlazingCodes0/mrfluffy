@@ -25,8 +25,8 @@ from PyQt6.QtGui import (QColor, QFont, QPainter, QPen, QSurfaceFormat, QCursor,
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSplitter,
-    QTextBrowser, QVBoxLayout, QWidget)
+    QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
+    QSplitter, QTextBrowser, QVBoxLayout, QWidget)
 
 import numpy as np
 from OpenGL.GL import *
@@ -83,6 +83,39 @@ def _norm(v):
     m = math.sqrt(sum(c * c for c in v)) or 1.0
     return (v[0] / m, v[1] / m, v[2] / m)
 
+
+class _GLDeck(QWidget):
+    """The stage: the GL world fills the whole deck, and the market interface
+    floats ABOVE it as an in-world panel — never a separate window that breaks
+    the view. It is part of the world, not a widow cut into it."""
+
+    def __init__(self):
+        super().__init__()
+        self.glw = None
+        self.panel = None
+
+    def add_gl(self, glw):
+        self.glw = glw
+        glw.setParent(self)
+        glw.show()
+
+    def add_panel(self, panel):
+        self.panel = panel
+        panel.setParent(self)
+
+    def place_panel(self):
+        p = self.panel
+        if p is None:
+            return
+        w, h = self.width(), self.height()
+        pw = max(250, min(400, int(w * 0.42)))
+        p.setGeometry(w - pw - 14, 14, pw, max(200, min(h - 28, int(h * 0.88))))
+        p.raise_()
+
+    def resizeEvent(self, e):
+        if self.glw is not None:
+            self.glw.setGeometry(self.rect())
+        self.place_panel()
 
 class WireGLWidget(QOpenGLWidget):
     stratum_changed = pyqtSignal(int, str)     # index, focus label (may be "")
@@ -1074,22 +1107,26 @@ class WireGLWidget(QOpenGLWidget):
         self._prism(0, 0, 1.7 * beat, 3.1 * beat, y + 14.0, y + 16.5, 4, col2)
         # the platforms: one per trading agent, coloured by what it waits for
         for a in w.get("agents", []):
+            self._platform_aesthetic(a, t)
+        # the loop's own wiring: each platform is reached from the centre column,
+        # and a pulse of light rides the link (the account hardware talking)
+        glLineWidth(1.0)
+        for i, a in enumerate(w.get("agents", [])):
             x, z = a["pos"][0], a["pos"][2]
-            yy = a["pos"][1]
             st = a["state"]
             base = MARKET_STATE_COL.get(st, MARKET_STATE_COL["off"])
-            if a.get("enabled") and st != "off":
-                pulse = 1.0 + 0.16 * math.sin(t * 2.2 + x * 0.5)
-                base = tuple(min(1.0, c * pulse) for c in base)
-            if self.selected_agent == a["id"]:
-                self._portal(x, z, yy, a.get("radius", 4.2) + 0.7, (1.0, 1.0, 1.0), t)
-            pillar = (base[0] * 0.45, base[1] * 0.45, base[2] * 0.45)
-            self._prism(x, z, 0.85, 0.55, y - 0.2, yy, 6, pillar)
-            r0 = a.get("radius", 4.2)
-            self._prism(x, z, r0, r0 * 0.94, yy, yy + 1.1, 6, base)
-            bob = 0.3 * math.sin(t * 1.8 + x)
-            self._octa(x, yy + 2.4 + bob, z, 0.55, (base[0], base[1], base[2]),
-                       squash=1.3)
+            glColor4f(base[0] * 0.8, base[1] * 0.8, base[2] * 0.8, 0.12)
+            glBegin(GL_LINES)
+            glVertex3f(0, y + 0.06, 0)
+            glVertex3f(x, y + 0.06, z)
+            glEnd()
+            q = (t * 0.45 + i * 0.37) % 1.0
+            gx, gz = x * q, z * q
+            glColor4f(base[0], base[1], base[2], 0.9)
+            glBegin(GL_LINES)
+            glVertex3f(gx, y + 0.07, gz)
+            glVertex3f(gx, y + 0.55, gz)
+            glEnd()
         # other users, announced over the relay
         for p in self._peers:
             self._draw_peer(p, t)
@@ -1097,6 +1134,121 @@ class WireGLWidget(QOpenGLWidget):
         rx, ry, rz = RETURN_GATE_POS
         self._portal(rx, rz, ry - 0.5, 3.4, (0.85, 0.45, 0.95), t + 1.0)
         self._portal(rx, rz, ry + 2.5, 2.2, (0.60, 0.30, 0.75), t + 2.0)
+        glLineWidth(1.0)
+
+    def _platform_aesthetic(self, a, t):
+        """A trading platform, brought up to the wire home's standard of beauty:
+        a halo on the floor, a lit plinth, a scalloped hex sigil that breathes, a
+        beacon of light and twin orbiting gems. Strictly dressing — the labels
+        and colours still carry the real snapshot, none of this is a datum."""
+        x, z = a["pos"][0], a["pos"][2]
+        yy = a["pos"][1]
+        y = self._market_floor()
+        st = a["state"]
+        base = MARKET_STATE_COL.get(st, MARKET_STATE_COL["off"])
+        r0 = float(a.get("radius", 4.2))
+        enabled = bool(a.get("enabled")) and st != "off"
+        pulse = 1.0 + 0.16 * math.sin(t * 2.2 + x * 0.5) if enabled else 1.0
+        heat = tuple(min(1.0, c * pulse) for c in base)
+        lit = tuple(min(1.0, c * 0.92) for c in base)
+        deep = tuple(c * 0.40 for c in base)
+
+        if self.selected_agent == a["id"]:
+            self._portal(x, z, yy, r0 + 0.7, (1.0, 1.0, 1.0), t)
+        # halo it casts on the floor
+        glColor4f(base[0] * 0.9, base[1] * 0.9, base[2] * 0.9, 0.10)
+        glBegin(GL_TRIANGLE_FAN)
+        glVertex3f(x, y + 0.03, z)
+        for i in range(33):
+            aa = 2 * math.pi * i / 32
+            glVertex3f(x + (r0 + 1.3) * math.cos(aa), y + 0.03,
+                       z + (r0 + 1.3) * math.sin(aa))
+        glEnd()
+        glColor4f(lit[0], lit[1], lit[2], 0.22)
+        glLineWidth(1.0)
+        glBegin(GL_LINE_LOOP)
+        for i in range(32):
+            aa = 2 * math.pi * i / 32
+            glVertex3f(x + (r0 + 1.1) * math.cos(aa), y + 0.03,
+                       z + (r0 + 1.1) * math.sin(aa))
+        glEnd()
+        # the plinth: a tiered hex lattice with lit struts
+        self._prism(x, z, 0.95, 0.62, y - 0.2, yy, 6, deep)
+        self._prism(x, z, 0.34, 0.26, y - 0.2, yy, 6,
+                    tuple(min(1.0, c * 1.7) for c in lit))
+        glLineWidth(2.0)
+        glColor4f(lit[0], lit[1], lit[2], 0.85)
+        glBegin(GL_LINES)
+        for i in range(6):
+            aa = 2 * math.pi * i / 6
+            glVertex3f(x + 0.92 * math.cos(aa), y - 0.15, z + 0.92 * math.sin(aa))
+            glVertex3f(x + 0.60 * math.cos(aa), yy, z + 0.60 * math.sin(aa))
+        glEnd()
+        glLineWidth(1.0)
+        # the pad: a scalloped hex sigil, bright centre breathing with the market
+        glShadeModel(GL_SMOOTH)
+        glBegin(GL_POLYGON)
+        glColor4f(heat[0], heat[1], heat[2], 1.0)
+        glVertex3f(x, yy + 0.16, z)
+        for i in range(13):
+            edge = i % 2 == 0
+            glColor3f(*(lit if edge else heat))
+            aa = 2 * math.pi * i / 12
+            rr = r0 if edge else r0 * 0.90
+            glVertex3f(x + rr * math.cos(aa), yy + 0.16, z + rr * math.sin(aa))
+        glEnd()
+        glShadeModel(GL_FLAT)
+        glColor4f(lit[0], lit[1], lit[2], 0.95)
+        glLineWidth(2.0)
+        glBegin(GL_LINE_LOOP)
+        for i in range(48):
+            aa = 2 * math.pi * i / 48
+            glVertex3f(x + r0 * math.cos(aa), yy + 0.17, z + r0 * math.sin(aa))
+        glEnd()
+        glLineWidth(1.0)
+        # a rune ring and a radar sweep cross the pad
+        rot = t * 0.6
+        glColor4f(heat[0], heat[1], heat[2], 0.9)
+        glBegin(GL_LINE_LOOP)
+        for i in range(24):
+            aa = 2 * math.pi * i / 24 + rot
+            glVertex3f(x + r0 * 0.55 * math.cos(aa), yy + 0.18, z + r0 * 0.55 * math.sin(aa))
+        glEnd()
+        glBegin(GL_LINES)
+        aa = rot * 1.8
+        glVertex3f(x, yy + 0.19, z)
+        glVertex3f(x + r0 * 0.98 * math.cos(aa), yy + 0.19, z + r0 * 0.98 * math.sin(aa))
+        glEnd()
+        # pulse rings ripple out while the order waits (enabled + live)
+        if enabled:
+            for k in range(2):
+                q = (t * 0.35 + k * 0.5) % 1.0
+                rr = 0.3 + q * (r0 + 0.4)
+                glColor4f(heat[0], heat[1], heat[2], 0.50 * (1.0 - q))
+                glBegin(GL_LINE_LOOP)
+                for i in range(18):
+                    aa = 2 * math.pi * i / 18
+                    glVertex3f(x + rr * math.cos(aa), yy + 0.20, z + rr * math.sin(aa))
+                glEnd()
+        # the beacon of light standing on the pad — brighter when live
+        bh = 2.6 if not enabled else 6.5
+        glColor4f(heat[0], heat[1], heat[2], 0.10)
+        glBegin(GL_TRIANGLE_STRIP)
+        for i in range(13):
+            aa = 2 * math.pi * i / 12
+            glVertex3f(x + r0 * 0.30 * math.cos(aa), yy + 0.2, z + r0 * 0.30 * math.sin(aa))
+            glVertex3f(x + r0 * 0.06 * math.cos(aa), yy + bh, z + r0 * 0.06 * math.sin(aa))
+        glEnd()
+        glColor4f(lit[0], lit[1], lit[2], 0.55)
+        glBegin(GL_LINES)
+        glVertex3f(x, yy + 0.2, z)
+        glVertex3f(x, yy + bh + (1.2 if enabled else 0.0), z)
+        glEnd()
+        # twin gems above the pad — the trading mind and its ghost
+        bob = yy + 2.4 + (0.30 if enabled else 0.15) * math.sin(t * 1.8 + x)
+        self._octa(x, bob, z, 0.55, heat, squash=1.3)
+        self._octa(x, bob + 1.1, z, 0.28,
+                   tuple(min(1.0, c * 1.7) for c in lit), squash=0.7)
         glLineWidth(1.0)
 
     def _market_labels(self):
@@ -1550,9 +1702,12 @@ class WireVisionTab(QWidget):
         lay.addLayout(bar)
 
         split = QSplitter(Qt.Orientation.Horizontal)
+        self.deck = _GLDeck()
+        self.deck.setMinimumSize(420, 320)
         self.gl = WireGLWidget()
         self.gl.setMinimumSize(420, 320)
-        split.addWidget(self.gl)
+        self.deck.add_gl(self.gl)
+        split.addWidget(self.deck)
 
         right = QFrame(); rv = QVBoxLayout(right)
         rv.addWidget(QLabel("CODEX — the wire, translated"))
@@ -1560,13 +1715,29 @@ class WireVisionTab(QWidget):
         rv.addWidget(self.codex, 1)
         self.market_panel = QFrame(); self.market_panel.setVisible(False)
         self.market_panel.setStyleSheet(
-            "QFrame#marketPanel{border:1px solid #2a4a55;border-radius:6px;background:#0b1418;}"
+            "QFrame#marketPanel{border:1px solid #2a4a55;border-radius:8px;"
+            "background:rgba(10,18,22,236);}"
             "QLabel{color:#cfe3dd;background:transparent;}"
-            "QPushButton{background:#12303a;border:1px solid #2a4a55;border-radius:4px;padding:3px;}")
+            "QPushButton{background:#12303a;border:1px solid #2a4a55;border-radius:4px;padding:3px;}"
+            "QScrollArea{background:transparent;border:none;}"
+            "QScrollArea>QWidget>QWidget{background:transparent;}")
         self.market_panel.setObjectName("marketPanel")
         mpl = QVBoxLayout(self.market_panel)
+        mpl.setContentsMargins(10, 8, 10, 8)
+        mpl.setSpacing(5)
+        header = QHBoxLayout()
         self.market_title = QLabel("BLACKHORSE \u2014 the market")
         self.market_title.setStyleSheet("color:#8be0ff;font-weight:bold;")
+        b_x = QPushButton("\u2715")
+        b_x.setFixedWidth(28)
+        b_x.setToolTip("Close the market panel (also: H)")
+        b_x.setStyleSheet("background:transparent;color:#8be0ff;border:1px solid #2a4a55;"
+                          "border-radius:4px;font-weight:bold;")
+        b_x.clicked.connect(lambda: self._set_menu(False))
+        header.addWidget(self.market_title)
+        header.addStretch(1)
+        header.addWidget(b_x)
+        mpl.addLayout(header)
         self.market_balance = QLabel("balance: \u2014")
         self.market_balance.setWordWrap(True)
         self.market_status = QLabel("")
@@ -1576,19 +1747,23 @@ class WireVisionTab(QWidget):
         self.market_form = QWidget()
         self._mform = QVBoxLayout(self.market_form)
         self._mform.setContentsMargins(0, 0, 0, 0)
+        self.market_scroll = QScrollArea()
+        self.market_scroll.setWidgetResizable(True)
+        self.market_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.market_scroll.setWidget(self.market_form)
         self.form_buttons = QHBoxLayout()
         self.b_new_agent = QPushButton("New agent\u2026")
         self.b_close_menu = QPushButton("Hide menu")
         self.form_buttons.addWidget(self.b_new_agent)
         self.form_buttons.addWidget(self.b_close_menu)
-        mpl.addWidget(self.market_title)
         mpl.addWidget(self.market_balance)
         mpl.addWidget(self.market_status)
         mpl.addWidget(self.market_ghost)
-        mpl.addWidget(self.market_form)
+        mpl.addWidget(self.market_scroll, 1)
         mpl.addLayout(self.form_buttons)
-        rv.addWidget(self.market_panel)
         self._menu_visible = False
+        self.deck.add_panel(self.market_panel)
+        self.deck.place_panel()
         split.addWidget(right)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
@@ -1773,6 +1948,7 @@ class WireVisionTab(QWidget):
             return None, {}
 
     def _open_editor(self, a):
+        self._set_menu(True)
         self._clear_form()
         aid = a["id"]
         cur_agent, doc = self._agent_doc(aid)
