@@ -120,15 +120,47 @@ creation and the balance in the account."* Findings + build:
   H toggles the menu, a second relay user appears as a peer, labels render, Home
   leaves, and no config was touched (disk untouched during the smoke test).
 
+### 6. The ghost + ward layers — sealing the online game (2026-10-11)
+User: *"add data encryption layer which assigns a random blah blah you the ghost
+in the shell stuff to secure our game because we don't want to make it easy for
+anyone to hack our users or the other way around — a defense system against
+malicious users who are not here to just play."* Built on top of the presence
+relay, all stdlib, all tested:
+- **Ghost layer (encryption + signing).** `MRFLUFFY_WIRE_KEY` (same phrase on the
+  relay and every player) derives a 32-byte key via PBKDF2-HMAC-SHA256
+  (200k iters); every `/pose` and `/peers` payload is sealed as an envelope
+  (random 12-byte nonce, bytes woven with an HMAC-SHA256 keystream, signed with
+  an HMAC, constant-time verification). A listener on the wire sees only
+  ciphertext; a pose not signed with the key is refused (401). Keyless client ↔
+  sealed floor and sealed client ↔ open floor both refuse honestly — mismatch is
+  visible, never silent. Each client also carries a **random per-session ghost-id**
+  (`secrets.token_hex(16)`) bound to its name on first contact; posing/leaving
+  under someone else's name with the wrong ghost-id is refused (403) and cannot
+  stomp the real user's pose.
+- **Ward layer (defense).** Body size cap (413 over 4 KiB), per-IP request rate
+  throttle (429), per-name burst cap, a bounded crowd (`MAX_PEERS`), expulsion of
+  expired peers, and every refused attempt appended to
+  `logs/.wiregate.events.log` and counted in the relay's `ward` counter.
+- **Visible in the game.** The market HUD shows `ghost layer: hardened ·
+  payloads encrypted + signed (PBKDF2→HMAC weave) · ward refused N attempt(s)`
+  (amber when the floor is open) plus the legend/honesty/controls block; the
+  floating menu carries the same line. `wiregate.py --serve` prints the layer
+  status + how players join (`MRFLUFFY_GATE_URL`, `MRFLUFFY_GATE_ADDR/PORT`).
+- Tests: plain cross-visibility unchanged; forged ghost-id → 403 with the real
+  pose untouched; oversized shell → 413; keyless client refused by a sealed
+  floor; sealed pair cross-visibility with `/peers` staying encrypted; wrong-
+  phrase sealed pose → 401 with the real pose kept; Xvfb render + menu smoke
+  on a hardened floor.
+
 ## Current state (end of 2026-10-11)
 
 - `wiregame.py` modified + `wiregate.py` new (untracked); `AGENTS.md` +
-  `SNAPSHOT.md` updated. Last commit on `master`: *"mrfluffy: add Wire Vision —
-  walk the wire (LAN -> protocol strata -> the endless dive)"* (8dc7929). Raven
-  was committed and snapshotted separately (e4eef00 → `fakegit/ravenv1.5`); the
-  raven fakegit work is done and raven is no longer open here.
+  `SNAPSHOT.md` updated. Last commit on `master`: *"mrfluffy: add the market —
+  a BlackHorse gate inside the wire"* (142089c).
 - Open threads: (a) make the amber reticle lock/label the nearest real object in
   3D; (b) polish the market (platform spacing, crowd density, a sounding bell at
-  the centre column — all dressing on top of the real snapshot). House rules
-  stand: ground truth only, no invented data, flavour not story; the market's
-  platforms/balance/crowd are real, the floor and colours are dressing.
+  the centre column — all dressing on top of the real snapshot); (c) optionally
+  switch the relay to real TLS later (the ghost weave is stdlib-protected, honest
+  about being a weave, not a vow). House rules stand: ground truth only, no
+  invented data, flavour not story; the market's platforms/balance/crowd are
+  real, the floor and colours are dressing.

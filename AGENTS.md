@@ -113,6 +113,23 @@ the presence relay + gated writes), the rest lives in `wiregame.py`.
 - Same honesty rule as the dive, made plain in the HUD: platforms/balance/crowd
   are **real**; the floor, the columns and the colours are **dressing**, and green
   /red are just a read of the files.
+- **The ghost layer — sealed traffic.** When `MRFLUFFY_WIRE_KEY` is set (same
+  phrase on the relay and every player), every pose and every 'who is here'
+  answer rides as an encrypted + signed shell: a PBKDF2-derived key drives an
+  HMAC-SHA256 keystream for secrecy and an HMAC signature for integrity, so a
+  listener on the wire cannot read positions/names and nobody can forge another
+  user's pose without the key. The HUD shows `ghost layer: hardened` when it is
+  on. A keyless client is honestly refused by a sealed floor, and a sealed
+  client is refused by an open one — mismatch is visible, not silent.
+- **The ward layer — defense, GitS-flavoured.** Every client also carries a
+  random per-session ghost-id (`secrets.token_hex`) that binds to its name on
+  first contact and must match on every pose/leave, so you cannot pretend to be
+  a user who is already on the floor (403). Bodies are size-capped (413 over
+  `MAX_POSE_BYTES`), per-IP request rates are throttled (429 over `RATE_MAX`),
+  per-name bursts are capped, the floor holds a bounded crowd (`MAX_PEERS`), and
+  every refused attempt is logged to `logs/.wiregate.events.log` and surfaced as
+  the ward count in the HUD. This is real, working protection (tested), not
+  scenery.
 
 ## Rules both channels share
 * You have **no tools**. Do NOT run any tool, do NOT open or search for any file —

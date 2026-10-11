@@ -115,6 +115,7 @@ class WireGLWidget(QOpenGLWidget):
         self.selected = None
         self._peers = []
         self._online = False
+        self._ghost_line = ""
         self._beat = 0.0
         self._last_t = time.time()
         self._hud_msg = ""
@@ -894,6 +895,7 @@ class WireGLWidget(QOpenGLWidget):
         if self.presence is None:
             self.presence = wiregate.Presence()
             self.presence.start()
+        self._ghost_line = self.presence.describe()
         self.market = True
         self.transition = None
         self.deep = None
@@ -984,6 +986,7 @@ class WireGLWidget(QOpenGLWidget):
             ok = self.presence.announce({"x": self.pos[0], "y": self.pos[1], "z": self.pos[2]})
             self._peers = self.presence.peers()
             self._online = ok
+            self._ghost_line = self.presence.describe()
         # landing: flying down onto a platform = stepping on it
         w = self.market_world
         if w:
@@ -1339,13 +1342,16 @@ class WireGLWidget(QOpenGLWidget):
         pr.drawText(14, h_ - 102,
                     "platforms are YOUR trading agents (real config); "
                     "bodies are other users on the relay (real); the floor is dressing")
+        ghost = self._ghost_line or "ghost layer: open \u00b7 set MRFLUFFY_WIRE_KEY on relay + players"
+        pr.setPen(QColor(160, 190, 210) if "hardened" in ghost else QColor(200, 170, 90))
+        pr.drawText(14, h_ - 86, ghost[:116])
         pr.setPen(QColor(120, 235, 220))
-        pr.drawText(14, h_ - 78,
+        pr.drawText(14, h_ - 66,
                     "WASD fly \u00b7 Space/C up/down \u00b7 E step / settings \u00b7 "
                     "B rebuild \u00b7 H menu \u00b7 Home leave")
         # fallback control hint when instructions are off
         pr.setPen(QColor(180, 200, 220))
-        pr.drawText(14, h_ - 62, "it is always open \u00b7 step onto a platform to trade")
+        pr.drawText(14, h_ - 50, "it is always open \u00b7 step onto a platform to trade")
         n0 = self._nearest()
         ccx, ccy = w_ // 2, h_ // 2
         if n0:
@@ -1565,6 +1571,8 @@ class WireVisionTab(QWidget):
         self.market_balance.setWordWrap(True)
         self.market_status = QLabel("")
         self.market_status.setWordWrap(True)
+        self.market_ghost = QLabel("")
+        self.market_ghost.setWordWrap(True)
         self.market_form = QWidget()
         self._mform = QVBoxLayout(self.market_form)
         self._mform.setContentsMargins(0, 0, 0, 0)
@@ -1576,6 +1584,7 @@ class WireVisionTab(QWidget):
         mpl.addWidget(self.market_title)
         mpl.addWidget(self.market_balance)
         mpl.addWidget(self.market_status)
+        mpl.addWidget(self.market_ghost)
         mpl.addWidget(self.market_form)
         mpl.addLayout(self.form_buttons)
         rv.addWidget(self.market_panel)
@@ -1698,6 +1707,7 @@ class WireVisionTab(QWidget):
         cur = acc.get("currency", "")
         bal = f"cash {cash:g} {cur} \u00b7 allocated {alloc:g} \u00b7 equity~{acc.get('equity_est')}"
         self.market_balance.setText("BLACKHORSE live balance:\n" + bal)
+        self.market_ghost.setText(self.gl._ghost_line)
         agent = None
         if self.gl.selected_agent and w:
             agent = next((a for a in w.get("agents", [])

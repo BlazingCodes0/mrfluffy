@@ -18,6 +18,20 @@ nothing else — no exchange call, no brain call, no invented number.
   * the menu                 — account balance + agent creation + editing your
                                agents' trading settings.
 
+The online layer is guarded like a small fortress without pretending:
+  * the GHOST layer  — when MRFLUFFY_WIRE_KEY is set, every pose and every
+                       'who is here' answer is encrypted (a PBKDF2-derived key
+                       driving an HMAC-SHA256 keystream) and signed (HMAC), so a
+                       listener on the wire cannot read positions or names, and
+                       nobody can forge someone else's pose without the key.
+  * the WARD layer   — every client also carries a random ghost-id (a per-session
+                       token) that binds to its name on first contact and must
+                       match on every pose/leave, so you cannot pretend to be a
+                       user who is already here. Bodies are size-capped,
+                       per-IP request rates are throttled, the floor holds a
+                       bounded number of users, and refused attempts are logged
+                       to logs/.wiregate.events.log.
+
 Writes ALWAYS take a backup of config/agents.json first, and the honesty block
 names exactly what is real (your agents, your balance, live users) and what is
 flavour (the floor, the columns, the crowd dressing).
@@ -27,10 +41,13 @@ CLI:  python3 wiregate.py            # the market snapshot as JSON
       python3 wiregate.py --create --profile slow --capital 50 --name "Daruma"
       python3 wiregate.py --set agent_1 capital=40 enabled=true
       python3 wiregate.py --serve    # run the presence relay on its own
+
+To run a hardened floor, set the same MRFLUFFY_WIRE_KEY on the relay and on each
+player:  MRFLUFFY_WIRE_KEY="a phrase you all know" python3 wiregate.py --serve
 """
 from __future__ import annotations
-import contextlib, fcntl, hashlib, json, math, os, socket, subprocess, sys
-import threading, time, urllib.request
+import base64, contextlib, fcntl, hashlib, hmac, json, math, os, secrets
+import socket, struct, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -62,6 +79,84 @@ EDITABLE = {
 PAIRS = ["DOT/USD", "ETH/USD", "BTC/USD", "SOL/USD", "XRP/USD"]
 
 PROFILES = {}
+
+# ---- the ghost layer: encryption + signing of the online traffic --------------
+# stdlib only: PBKDF2 key derivation + an HMAC-SHA256 keystream ("ghost weave")
+# for secrecy, HMAC for integrity, and a per-session ghost-id so names cannot be
+# impersonated by someone who is already on the floor.
+
+GHOST_KEY_ENV = "MRFLUFFY_WIRE_KEY"
+GHOST_SALT = b"mrfluffy-wire-ghost-v1"
+GHOST_ITERS = 200_000
+GHOST_TAG = "ghost"
+
+_WARD_EVENTS = FLUFFY / "logs" / ".wiregate.events.log"
+
+
+def _ghost_key():
+    """32 raw bytes from MRFLUFFY_WIRE_KEY, or None when the floor is open."""
+    phrase = os.environ.get(GHOST_KEY_ENV, "")
+    if not phrase:
+        return None
+    try:
+        return hashlib.pbkdf2_hmac("sha256", phrase.encode("utf-8"),
+                                   GHOST_SALT, GHOST_ITERS, dklen=32)
+    except Exception:
+        return None
+
+
+def _ghost_xor(key: bytes, nonce: bytes, data: bytes) -> bytes:
+    out = bytearray()
+    ctr = 0
+    i = 0
+    while i < len(data):
+        block = hmac.new(key, nonce + struct.pack(">Q", ctr),
+                         hashlib.sha256).digest()
+        n = min(32, len(data) - i)
+        out += bytes(data[i + j] ^ block[j] for j in range(n))
+        i += n
+        ctr += 1
+    return bytes(out)
+
+
+def _ghost_envelope(key: bytes, payload: dict) -> dict:
+    """Seal a payload: random nonce, weave the bytes, sign the sealed shell."""
+    nonce = secrets.token_bytes(12)
+    plain = json.dumps(payload).encode("utf-8")
+    ctext = _ghost_xor(key, nonce, plain)
+    sig = hmac.new(key, nonce + ctext, hashlib.sha256).hexdigest()
+    return {"v": 1, GHOST_TAG: True,
+            "n": base64.b64encode(nonce).decode("ascii"),
+            "d": base64.b64encode(ctext).decode("ascii"),
+            "s": sig}
+
+
+def _ghost_open(key: bytes, env: dict):
+    """Open a sealed shell. Returns the payload, or None when invalid/forged."""
+    try:
+        if not env or env.get(GHOST_TAG) is not True:
+            return None
+        nonce = base64.b64decode(env.get("n", ""))
+        ctext = base64.b64decode(env.get("d", ""))
+        sig = env.get("s", "")
+        good = hmac.compare_digest(sig,
+                                   hmac.new(key, nonce + ctext,
+                                            hashlib.sha256).hexdigest())
+        if not good or not nonce:
+            return None
+        return json.loads(_ghost_xor(key, nonce, ctext))
+    except Exception:
+        return None
+
+
+def _sec_event(msg: str) -> None:
+    try:
+        _WARD_EVENTS.parent.mkdir(parents=True, exist_ok=True)
+        with open(_WARD_EVENTS, "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} "
+                    f"{msg}\n")
+    except Exception:
+        pass
 
 
 def _load_json(p: Path, default):
@@ -469,7 +564,14 @@ class Presence:
         self._base = (base_url or f"http://127.0.0.1:{addr[1]}").rstrip("/")
         self.user = (user or os.environ.get("MRFLUFFY_WIRE_USER")
                      or socket.gethostname() or "wire").replace(" ", "_")
+        self.key = _ghost_key()
+        self.ghost = self.key is not None
+        self.tok = secrets.token_hex(16)      # our random ghost-id for this session
+        self.ward = 0                         # times the relay's ward turned us away
         self._peers: dict = {}
+        self._tok: dict = {}                  # name -> bound ghost-id
+        self._rate: dict = {}                 # ip -> (window, count)
+        self._burst: dict = {}                # name -> (window, count)
         self._lock = threading.Lock()
         self._server = None
         self._thread = None
@@ -533,15 +635,30 @@ class Presence:
         except Exception:
             return False
 
+    def _seal(self, payload: dict) -> bytes:
+        """Envelope a payload when the ghost layer is on, else plain JSON."""
+        body = _ghost_envelope(self.key, payload) if self.key else payload
+        return json.dumps(body).encode()
+
+    def _unwrap(self, doc: dict):
+        if not doc:
+            return {}
+        if doc.get(GHOST_TAG) is True:
+            return _ghost_open(self.key, doc) if self.key else None
+        return doc if not self.key else None
+
     def announce(self, pose: dict) -> bool:
-        """POST our pose to the relay; False means there is no relay (solo floor)."""
+        """POST our sealed pose to the relay; False when the relay refuses us."""
         try:
+            self._online = False
             req = urllib.request.Request(
                 self._base + "/pose", method="POST",
-                data=json.dumps({"name": self.user, **pose}).encode(),
+                data=self._seal({"name": self.user, "tok": self.tok,
+                                 "pose": pose}),
                 headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=1.0):
-                pass
+            with urllib.request.urlopen(req, timeout=1.0) as r:
+                got = json.loads(r.read() or b"{}")
+                self.ward = int(got.get("ward", 0) or 0)
             self._online = True
             return True
         except Exception:
@@ -552,7 +669,7 @@ class Presence:
         try:
             req = urllib.request.Request(
                 self._base + "/leave", method="POST",
-                data=json.dumps({"name": self.user}).encode(),
+                data=self._seal({"name": self.user, "tok": self.tok}),
                 headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=1.0):
                 pass
@@ -563,12 +680,28 @@ class Presence:
         """Other users' characters in the market, pulled from the relay."""
         try:
             with urllib.request.urlopen(self._base + "/peers", timeout=1.0) as r:
-                data = json.loads(r.read() or b"{}")
+                doc = json.loads(r.read() or b"{}")
+            data = self._unwrap(doc)
+            if data is None:
+                return []
             return [p for p in data.get("peers", [])
                     if p.get("name") and p.get("name") != self.user]
         except Exception:
             return []
 
+    def describe(self) -> str:
+        if self.ghost:
+            return (f"ghost layer: hardened \u00b7 payloads encrypted + signed "
+                    f"(PBKDF2\u2192HMAC weave) \u00b7 ward refused {self.ward} attempt(s)")
+        return ("ghost layer: open \u00b7 set MRFLUFFY_WIRE_KEY on the relay and "
+                "every player to seal the floor")
+
+
+RATE_WINDOW = 10.0        # seconds
+RATE_MAX = 200            # requests per window per IP
+BURST_MAX = 40            # poses per window per name
+MAX_POSE_BYTES = 4096     # reject oversized shells
+MAX_PEERS = 64            # the floor holds a bounded crowd
 
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -582,36 +715,111 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _read_body(self) -> dict:
-        n = int(self.headers.get("Content-Length") or 0)
+    def _ward(self, pr) -> bool:
+        """Ward off clients that are hammering the floor. True = allow."""
+        ip = (self.client_address[0] if self.client_address else "?")
+        now = time.time()
+        with pr._lock:
+            w0, cnt = pr._rate.get(ip, (now, 0))
+            if now - w0 > RATE_WINDOW:
+                w0, cnt = now, 0
+            cnt += 1
+            pr._rate[ip] = (w0, cnt)
+            if cnt > RATE_MAX:
+                pr.ward += 1
+                _sec_event(f"rate-refused ip={ip}")
+                return False
+        return True
+
+    def _read_body(self):
+        """Read a body, refusing anything oversized (ward) or malformed."""
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except Exception:
+            n = 0
+        if n <= 0 or n > MAX_POSE_BYTES:
+            return None
         try:
             return json.loads(self.rfile.read(n) or b"{}")
         except Exception:
-            return {}
+            return None
+
+    def _open_body(self, pr, body):
+        """Decode a sealed (ghost) or open body, in the mode the relay runs."""
+        if pr.key:
+            got = _ghost_open(pr.key, body)
+            if got is None:
+                pr.ward += 1
+                _sec_event("sealed-shell refused (bad key / forged signature)")
+                return None, "sealed-shell refused"
+            return got, None
+        if body and body.get(GHOST_TAG) is True:
+            pr.ward += 1
+            _sec_event("shell refused \u2014 relay is open, sender sealed")
+            return None, "unexpected sealed shell"
+        return body or {}, None
 
     def do_GET(self):
         pr = getattr(self.server, "presence", None)
         if pr is None:
             return self._json(500, {"ok": False})
+        if not self._ward(pr):
+            return self._json(429, {"ok": False, "error": "ward refuses"})
         if self.path == "/ping":
             return self._json(200, {"ok": True, "users": len(pr._peers),
-                                    "you": pr.user})
+                                    "you": pr.user, "ghost": pr.ghost,
+                                    "ward": pr.ward})
         if self.path == "/peers":
-            return self._json(200, {"peers": pr._snapshot()})
+            data = {"peers": pr._snapshot(), "ghost": pr.ghost}
+            body = _ghost_envelope(pr.key, data) if pr.key else data
+            return self._json(200, body)
         return self._json(404, {"ok": False})
 
     def do_POST(self):
         pr = getattr(self.server, "presence", None)
         if pr is None:
             return self._json(500, {"ok": False})
-        body = self._read_body()
-        name = str(body.get("name") or "wire")[:48]
+        if not self._ward(pr):
+            return self._json(429, {"ok": False, "error": "ward refuses"})
+        raw = self._read_body()
+        if raw is None:
+            return self._json(413, {"ok": False, "error": "shell too large"})
+        content, err = self._open_body(pr, raw)
+        if content is None:
+            return self._json(401, {"ok": False, "error": err})
+        name = str(content.get("name") or "wire")[:48]
+        tok = str(content.get("tok") or "")[:128]
+        if not tok:
+            return self._json(401, {"ok": False, "error": "ghost-id required"})
+        with pr._lock:
+            bound = pr._tok.get(name)
+            if bound is None:
+                pr._tok[name] = tok
+            elif not hmac.compare_digest(bound, tok):
+                pr.ward += 1
+                _sec_event(f"ghost-id refused name={name}")
+                return self._json(403, {"ok": False,
+                                        "error": "ghost-id already bound"})
+            now = time.time()
+            w0, cnt = pr._burst.get(name, (now, 0))
+            if now - w0 > RATE_WINDOW:
+                w0, cnt = now, 0
+            pr._burst[name] = (w0, cnt + 1)
+            tooburst = cnt + 1 > BURST_MAX
+        if tooburst:
+            pr.ward += 1
+            _sec_event(f"burst-refused name={name}")
+            return self._json(429, {"ok": False, "error": "ward refuses"})
         if self.path == "/pose":
-            pr._upsert(name, body)
-            return self._json(200, {"ok": True})
+            if name not in pr._peers and len(pr._peers) >= MAX_PEERS:
+                pr.ward += 1
+                _sec_event(f"floor-full refused name={name}")
+                return self._json(429, {"ok": False, "error": "floor is full"})
+            pr._upsert(name, content.get("pose") or {})
+            return self._json(200, {"ok": True, "ward": pr.ward})
         if self.path == "/leave":
             pr._drop(name)
-            return self._json(200, {"ok": True})
+            return self._json(200, {"ok": True, "ward": pr.ward})
         return self._json(404, {"ok": False})
 
 
@@ -704,9 +912,18 @@ if __name__ == "__main__":
     elif argv and argv[0] == "--set":
         _cli_set(argv[1:])
     elif argv and argv[0] == "--serve":
-        pr = Presence()
+        host = os.environ.get("MRFLUFFY_GATE_ADDR", "127.0.0.1")
+        port = int(os.environ.get("MRFLUFFY_GATE_PORT", "17833"))
+        pr = Presence(addr=(host, port))
         pr.start()
-        print(f"wiregate presence relay on {pr.addr} (user {pr.user}) — Ctrl-C to stop")
+        if not pr.started:
+            sys.exit(f"could not bind the presence relay on {pr.addr} — "
+                     "is another relay already running?")
+        print(f"wiregate presence relay on {pr.addr} (user {pr.user})")
+        print(pr.describe())
+        print("players join with MRFLUFFY_GATE_URL=http://<this-host>:PORT "
+              "plus MRFLUFFY_WIRE_KEY (same phrase, relay + players)")
+        print("Ctrl-C to stop")
         try:
             while True:
                 time.sleep(1)
