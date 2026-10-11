@@ -253,23 +253,55 @@ travel through or exit back to the chapters."*
   stable across frames; the full-screen toggle round-trips from the in-tab button,
   the app button, and `F11`, and leaving the tab restores the chrome.
 
+### 11. The whole Qur'an, a way out of full screen, and quick travel (2026-10-11)
+
+- **The whole Book is in the room now.** All 114 surahs, 6236 ayahs, are carried
+  in `quran_data.json` (3.3 MB), copied byte-for-byte from alquran.cloud
+  (`quran-uthmani`, `en.transliteration`, `en.sahih`); `quran.py` now just opens
+  that file (same `SURAS`/`SOURCES`/`ORDER`/`all_suras()` interface) and
+  `fetch_quran.py` is the provenance script that rebuilds it. The six small
+  surahs' hand-written notes are preserved; every other surah gets a factual note.
+  Only a BOM is stripped.
+- **Full screen can't trap you any more.** The bars that held the old exit button
+  are hidden in full screen, so a floating **"✕ exit full screen"** overlay now
+  stays over the world (parented to the `_GLDeck` stage, positioned top-centre),
+  and `Esc` also drops full screen. `F11` still toggles. Leaving the tab/closing
+  restores everything.
+- **Quick travel without flying.** A floating quick bar over the world gives
+  `◀ prev ayah`, `next ayah ▶` (→ "finish ➞ chapters" at a chapter's end),
+  `chapters`, `random chapter`, and `leave the room`; and the codex panel now
+  holds a **list of all 114 chapters** — pick one and open its first ayah, no
+  flying needed. The bar shows only in the Word room, and only the moves that fit
+  the mode.
+- **A sky of 114 stars stays smooth.** The chapter cluster names only the few
+  stars nearest you; the far stars draw as small points (level-of-detail), the
+  nearest ~12 in full. The ayah sky panel sizes the Arabic to fit, so even 2:282
+  (the Book's longest verse) is shown whole.
+- Verified headless: all 114 chapter-stars reachable in 3D; every surah's recipe
+  builds (0 failures); the full-screen exit button and `Esc` both drop full
+  screen and the button floats inside the deck; the quick bar and chapter list do
+  prev/next/chapters/random/leave; a chapter list click opens the surah's first
+  ayah; opening surah 2 (286 ayahs) and travelling works; rendering 2:282 works.
+
 ## Current state (end of 2026-10-11)
 
-- `wiregame.py` modified again for the ayah engine (word room restructured) and
-  again for full screen + the star-cluster chapter sky; `app.py` modified for
-  full-screen chrome hiding; `quranworld.py` new; `quran.py` unchanged (pure
-  scripture). `AGENTS.md` + `SNAPSHOT.md` updated with these sections.
-- Uncommitted work in the tree: the ayah engine (section 9) and this full-screen +
-  star-cluster work (section 10) are not yet committed; the last snapshot
-  `~/fakegit/mrfluffyv1.6` is behind them.
+- `wiregame.py` modified for the ayah engine (word room), again for full screen +
+  the star-cluster chapter sky, and again for the whole-Qur'an cluster, the
+  full-screen exit overlay, and the quick-travel bar; `app.py` modified for
+  full-screen chrome hiding; `quranworld.py` new; `quran.py` rewritten to open the
+  data; `quran_data.json` (all 114 surahs) and `fetch_quran.py` new.
+  `AGENTS.md` + `SNAPSHOT.md` updated with these sections.
+- Uncommitted work in the tree: the ayah engine (section 9), full screen +
+  star-cluster (section 10), and this whole-Qur'an + exit/quick-travel work
+  (section 11) are not yet committed; the last snapshot
+  `~/fakegit/mrfluffyv1.7` is at commit `fb69f18`, behind them.
 - Open threads: (a) make the amber reticle lock/label the nearest real object in
   3D; (b) polish the market further (crowd density, a sounding bell at the centre
   column, the gate glow — all dressing on top of the real snapshot); (c) optionally
   switch the relay to real TLS later (the ghost weave is stdlib-protected, honest
-  about being a weave, not a vow); (d) grow the chapter list straight from the
-  mushaf and let surah themes/motifs be tuned. House rules stand: ground truth
-  only, no invented data, flavour not story; the market's platforms/balance/crowd
-  are real, the floor and colours are dressing; the Quran room's text is a
-  faithful local copy of the mushaf, nothing in it is ever depicted, and each
-  generated world is an honest impression of the verse's named images — never a
-  claim about its meaning.
+  about being a weave, not a vow); (d) let surah themes/motifs be tuned. House
+  rules stand: ground truth only, no invented data, flavour not story; the market's
+  platforms/balance/crowd are real, the floor and colours are dressing; the Quran
+  room's text is a faithful local copy of the whole mushaf, nothing in it is ever
+  depicted, and each generated world is an honest impression of the verse's named
+  images — never a claim about its meaning.

@@ -20,8 +20,8 @@ from __future__ import annotations
 import math, random, sys, time, hashlib
 
 from PyQt6.QtCore import Qt, QRect, QTimer, pyqtSignal
-from PyQt6.QtGui import (QColor, QFont, QPainter, QPen, QSurfaceFormat, QCursor,
-                         QRadialGradient, QShortcut, QKeySequence)
+from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QPainter, QPen, QSurfaceFormat,
+                         QCursor, QRadialGradient, QShortcut, QKeySequence)
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel,
@@ -110,6 +110,7 @@ class _GLDeck(QWidget):
         super().__init__()
         self.glw = None
         self.panel = None
+        self.overlays = []          # (widget, anchor) floating over the world
 
     def add_gl(self, glw):
         self.glw = glw
@@ -120,6 +121,10 @@ class _GLDeck(QWidget):
         self.panel = panel
         panel.setParent(self)
 
+    def add_overlay(self, widget, anchor="bottom-center"):
+        widget.setParent(self)
+        self.overlays.append((widget, anchor))
+
     def place_panel(self):
         p = self.panel
         if p is None:
@@ -129,10 +134,26 @@ class _GLDeck(QWidget):
         p.setGeometry(w - pw - 14, 14, pw, max(200, min(h - 28, int(h * 0.88))))
         p.raise_()
 
+    def place_overlays(self):
+        w, h = self.width(), self.height()
+        for ov, anchor in self.overlays:
+            sw, sh = ov.sizeHint().width(), ov.sizeHint().height()
+            if anchor == "top-center":
+                x, y = (w - sw) // 2, 12
+            elif anchor == "top-right":
+                x, y = w - sw - 14, 14
+            elif anchor == "bottom-right":
+                x, y = w - sw - 14, h - sh - 16
+            else:                                   # bottom-center
+                x, y = (w - sw) // 2, h - sh - 16
+            ov.setGeometry(x, y, sw, sh)
+            ov.raise_()
+
     def resizeEvent(self, e):
         if self.glw is not None:
             self.glw.setGeometry(self.rect())
         self.place_panel()
+        self.place_overlays()
 
 class WireGLWidget(QOpenGLWidget):
     stratum_changed = pyqtSignal(int, str)     # index, focus label (may be "")
@@ -142,6 +163,8 @@ class WireGLWidget(QOpenGLWidget):
     agent_selected = pyqtSignal(object)        # an agent dict (one platform)
     menu_toggle = pyqtSignal(bool)             # show/hide the market menu
     fullscreen_request = pyqtSignal()          # F11 — the tab owns full screen
+    escape_request = pyqtSignal()              # Esc — leave full screen (the tab decides)
+    word_changed = pyqtSignal()                # entered/left the Word room, or moved ayah
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -851,6 +874,7 @@ class WireGLWidget(QOpenGLWidget):
         if k == Qt.Key.Key_Escape:
             self._drag = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.escape_request.emit()       # the tab drops full screen if it is on
             if self.market and self.selected_agent:
                 self.selected_agent = None
                 self.selected = None
@@ -1265,6 +1289,7 @@ class WireGLWidget(QOpenGLWidget):
         elif not quiet:
             self._flash("back to the cluster of chapters \u2014 fly to another star, "
                         "or leave by the far gate")
+        self.word_changed.emit()
         self.update()
 
     def _word_enter_ayah(self, surah, idx):
@@ -1279,6 +1304,7 @@ class WireGLWidget(QOpenGLWidget):
         self.pitch = 0.05
         self._flash(f"{surah['number']}:{ay[idx]['n']}  \u00b7  {surah['name']}  "
                     f"\u00b7  [ ] travel the ayah \u00b7 R the chapters")
+        self.word_changed.emit()
 
     def _word_move(self, d):
         """[ ] / scroll — travel ayah by ayah; the end returns to the chapters."""
@@ -1297,6 +1323,30 @@ class WireGLWidget(QOpenGLWidget):
             self._word_to_select(quiet=True)
             return
         self._word_enter_ayah(surah, nxt)
+
+    # -- the same moves, for the on-screen buttons (a reader who does not fly) --
+    def word_next(self):
+        self._word_move(1)
+
+    def word_prev(self):
+        self._word_move(-1)
+
+    def word_back_to_chapters(self):
+        self._word_to_select()
+
+    def word_lucky(self):
+        self._word_random()
+
+    def word_leave_room(self):
+        self._leave_word()
+
+    def word_open_surah(self, number):
+        """Open any chapter by its mushaf number (from the codex list)."""
+        if not self.word:
+            self._enter_word()
+        s = self._word_surah_by_number(number)
+        if s is not None:
+            self._word_enter_ayah(s, 0)
 
     def _word_random(self):
         """A random chapter, opening at its first ayah — travel on from there."""
@@ -1355,6 +1405,7 @@ class WireGLWidget(QOpenGLWidget):
         if was:
             self._flash("back on the wire \u2014 the room of the Word is still "
                         "there, whenever you turn back to it")
+        self.word_changed.emit()
 
     def _word_step(self, dt):
         k = self.keys
@@ -1459,10 +1510,30 @@ class WireGLWidget(QOpenGLWidget):
         self._octa(rx, ry, rz, 3.0 * glow, (0.30, 0.62, 0.52), squash=0.5)
         self._sphere(rx, ry, rz, 1.6 * glow, (0.62, 0.90, 0.72))
         self._portal(rx, rz, ry - 2.8, 2.6, (0.60, 0.88, 0.72), t + 0.4)
-        # the chapters, each a bright star in the cluster
+        # the chapters, each a bright star in the cluster. The whole Book is here
+        # (114 stars); draw the few nearest in full, the rest as small stars, so
+        # the sky stays smooth to fly through.
         n = max(1, len(self._word_suras))
+        px, py, pz = self.pos
+        stars = []
         for i, s in enumerate(self._word_suras):
             x, yy, z = self._word_chapter_pos(i, n)
+            d2 = (px - x) ** 2 + (py - yy) ** 2 + (pz - z) ** 2
+            stars.append((d2, i, s, x, yy, z))
+        stars.sort(key=lambda c: c[0])
+        near = stars[:12]
+        near_idx = {c[1] for c in near}
+        glPointSize(3.0)
+        glBegin(GL_POINTS)
+        for (d2, i, s, x, yy, z) in stars:
+            if i in near_idx:
+                continue
+            tw = 0.6 + 0.4 * math.sin(t * 1.8 + i)
+            glColor4f(0.20 + 0.45 * tw, 0.24 + 0.60 * tw, 0.40 + 0.95 * tw, 0.9)
+            glVertex3f(x, yy, z)
+        glEnd()
+        glPointSize(1.0)
+        for (d2, i, s, x, yy, z) in near:
             tw = 1.0 + 0.16 * math.sin(t * 1.8 + i)
             self._octa(x, yy, z, 2.8 * tw, (0.24, 0.48, 0.60), squash=0.45)
             self._sphere(x, yy, z, 1.4 * tw, (0.72, 0.86, 0.98))
@@ -1665,8 +1736,16 @@ class WireGLWidget(QOpenGLWidget):
                           "back to the chapters [E]", (0.70, 0.92, 0.80)))
         else:
             n = max(1, len(self._word_suras))
+            px, py, pz = self.pos
+            chapters = []
             for i, s in enumerate(self._word_suras):
                 x, yy, z = self._word_chapter_pos(i, n)
+                d = (px - x) ** 2 + (py - yy) ** 2 + (pz - z) ** 2
+                chapters.append((d, x, yy, z, s))
+            chapters.sort(key=lambda c: c[0])
+            # of the whole sky of chapters, name only the few nearest you — so a
+            # cluster of 114 stars stays readable as you fly through it
+            for (_d, x, yy, z, s) in chapters[:7]:
                 items.append((x, yy + 2.6, z,
                               f"{s['number']} \u00b7 {s['name']} \u2014 "
                               f"{s['translation']} ({len(s['ayahs'])} verses) [E]",
@@ -2308,8 +2387,10 @@ class WireGLWidget(QOpenGLWidget):
         """The ayah, written on the sky — Arabic, transliteration, a translation."""
         txt = quranworld.sky_text(surah, ay)
         x0, x1 = int(w_ * 0.11), int(w_ - w_ * 0.11)
-        # a soft panel so the words stay legible over the world
-        band_h = max(150, int(h_ * 0.40))
+        # a soft panel so the words stay legible over the world — taller for the
+        # whole ayah to fit, whatever its length (some verses are very long)
+        bottom_cap = h_ - 132
+        band_h = max(170, min(bottom_cap - 60, int(h_ * 0.62)))
         pr.fillRect(x0, 60, x1 - x0, band_h, QColor(4, 10, 16, 150))
         pr.setPen(QColor(70, 120, 132))
         pr.drawRect(x0, 60, x1 - x0, band_h)
@@ -2321,29 +2402,40 @@ class WireGLWidget(QOpenGLWidget):
                f"ayah {ay['n']} of {len(surah['ayahs'])}")
         fm = pr.fontMetrics()
         pr.drawText((w_ - fm.horizontalAdvance(ref)) // 2, 82, ref)
-        # the Arabic, large, centred — the Qur'an itself
-        ar_h = int(h_ * 0.15)
-        ar_f = QFont("Sans Serif", max(16, ar_h // 2))
-        pr.setFont(ar_f)
+        # the Arabic, centred — the Qur'an itself. Size it down until it fits, so
+        # even the Book's longest verse (2:282) is shown whole, never clipped.
+        ar_w = x1 - x0 - 40
+        ar_top = 92
+        tr_space = 40
+        en_space = max(60, int(band_h * 0.26))
+        ar_max_h = max(40, band_h - (ar_top - 60) - tr_space - en_space)
+        size = max(16, int(h_ * 0.075))
+        while size > 10:
+            m = QFontMetrics(QFont("Sans Serif", size))
+            br = m.boundingRect(QRect(0, 0, ar_w, 100000),
+                                int(Qt.TextFlag.TextWordWrap), txt["arabic"])
+            if br.height() <= ar_max_h:
+                break
+            size -= 1
+        pr.setFont(QFont("Sans Serif", size))
         pr.setPen(QColor(235, 240, 245))
-        pr.drawText(QRect(x0 + 20, 92, x1 - x0 - 40, ar_h),
+        pr.drawText(QRect(x0 + 20, ar_top, ar_w, ar_max_h),
                     int(Qt.AlignmentFlag.AlignHCenter) | int(Qt.AlignmentFlag.AlignTop)
                     | int(Qt.TextFlag.TextWordWrap), txt["arabic"])
         # transliteration + translation beneath it
-        ty = 92 + ar_h + 8
-        tr_f = QFont("Monospace", max(10, int(h_ * 0.019)))
+        ty = 60 + band_h - en_space - tr_space + 4
+        tr_f = QFont("Monospace", max(9, int(h_ * 0.017)))
         tr_f.setItalic(True)
         pr.setFont(tr_f)
         pr.setPen(QColor(160, 185, 195))
-        th = pr.fontMetrics().height() * (1 + len(txt["transliteration"]) // 90)
-        pr.drawText(QRect(x0 + 30, ty, x1 - x0 - 60, th),
+        pr.drawText(QRect(x0 + 30, ty, x1 - x0 - 60, tr_space - 6),
                     int(Qt.AlignmentFlag.AlignHCenter) | int(Qt.AlignmentFlag.AlignTop)
                     | int(Qt.TextFlag.TextWordWrap), txt["transliteration"])
-        ey = ty + th + 6
-        en_f = QFont("Serif", max(11, int(h_ * 0.021)))
+        ey = ty + tr_space
+        en_f = QFont("Serif", max(11, int(h_ * 0.020)))
         pr.setFont(en_f)
         pr.setPen(QColor(216, 226, 231))
-        pr.drawText(QRect(x0 + 30, ey, x1 - x0 - 60, 90),
+        pr.drawText(QRect(x0 + 30, ey, x1 - x0 - 60, en_space),
                     int(Qt.AlignmentFlag.AlignHCenter) | int(Qt.AlignmentFlag.AlignTop)
                     | int(Qt.TextFlag.TextWordWrap), txt["translation"])
         # the world, described honestly (what image, not what meaning)
@@ -2366,38 +2458,51 @@ class WireGLWidget(QOpenGLWidget):
                     "\u00b7 E at a gate \u00b7 R the chapters \u00b7 Home leave the room")
 
     def _hud_word_select(self, pr, now, w_, h_):
-        """The hall of chapters: the surahs, and luck, laid out to choose from."""
+        """The cluster of chapters: the whole Book, hung like stars to fly to."""
+        total = sum(len(s["ayahs"]) for s in self._word_suras)
         # title
         pr.setFont(QFont("Monospace", 14, QFont.Weight.Bold))
         fm = pr.fontMetrics()
         title = "THE CHAPTERS, HUNG LIKE STARS"
         pr.setPen(QColor(150, 240, 228))
-        pr.drawText((w_ - fm.horizontalAdvance(title)) // 2, h_ // 2 - 6, title)
+        pr.drawText((w_ - fm.horizontalAdvance(title)) // 2, h_ // 2 - 24, title)
         pr.setFont(QFont("Monospace", 10))
         fm = pr.fontMetrics()
+        sub = (f"the whole Book is here \u2014 {len(self._word_suras)} chapters, "
+               f"{total} ayahs")
+        pr.setPen(QColor(140, 210, 205))
+        pr.drawText((w_ - fm.horizontalAdvance(sub)) // 2, h_ // 2 - 2, sub)
         hint = ("fly to a star and press E to open that chapter \u00b7 or press R for a "
-                "random chapter, which opens at its first ayah")
+                "random chapter \u00b7 or pick any chapter from the list at right")
         pr.setPen(QColor(150, 190, 200))
-        pr.drawText((w_ - fm.horizontalAdvance(hint)) // 2, h_ // 2 + 18, hint)
-        # a small codex of what is here — faithful to quran.py
-        px = 14
-        py = 66
-        pr.fillRect(px, py, 300, 20 + 16 * (len(self._word_suras) + 1),
-                    QColor(6, 14, 20, 180))
+        fm = pr.fontMetrics()
+        pr.drawText((w_ - fm.horizontalAdvance(hint)) // 2, h_ // 2 + 20, hint)
+        # a small codex of the chapters nearest you — the sky is too full to name all
+        n = max(1, len(self._word_suras))
+        px, py, pz = self.pos
+        near = []
+        for i, s in enumerate(self._word_suras):
+            x, yy, z = self._word_chapter_pos(i, n)
+            near.append(((px - x) ** 2 + (py - yy) ** 2 + (pz - z) ** 2, s))
+        near.sort(key=lambda c: c[0])
+        rows = near[:10]
+        px0 = 14
+        py0 = 66
+        pr.fillRect(px0, py0, 300, 40 + 16 * len(rows), QColor(6, 14, 20, 180))
         pr.setPen(QColor(130, 210, 200))
         pr.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
-        pr.drawText(px + 10, py + 18, "THE CHAPTERS (a chosen few)")
+        pr.drawText(px0 + 10, py0 + 18, "NEAREST CHAPTERS TO YOU")
         pr.setFont(QFont("Monospace", 9))
-        yy = py + 36
-        for s in self._word_suras:
+        yy = py0 + 40
+        for (_d, s) in rows:
             pr.setPen(QColor(180, 200, 220))
-            pr.drawText(px + 10, yy, f"{s['number']:>3}  {s['name']} \u2014 "
-                                     f"{s['translation']}")
+            pr.drawText(px0 + 10, yy, f"{s['number']:>3}  {s['name']} \u2014 "
+                                      f"{s['translation']}")
             pr.setPen(QColor(120, 160, 170))
-            pr.drawText(px + 250, yy, f"{len(s['ayahs'])}v")
+            pr.drawText(px0 + 250, yy, f"{len(s['ayahs'])}v")
             yy += 16
         pr.setPen(QColor(150, 190, 185))
-        pr.drawText(px + 10, yy, "R  \u2014  a random chapter \u00b7 first ayah")
+        pr.drawText(px0 + 10, yy + 4, "R  \u2014  a random chapter \u00b7 first ayah")
         # honesty + controls
         pr.setPen(QColor(130, 165, 175))
         pr.drawText(14, h_ - 118,
@@ -2616,6 +2721,28 @@ class WireVisionTab(QWidget):
         right = QFrame(); rv = QVBoxLayout(right)
         self.right = right
         rv.addWidget(QLabel("CODEX — the wire, translated"))
+        # A direct way into the Word for a reader who does not want to fly: every
+        # chapter of the Qur'an, listed — pick one, open its first ayah.
+        self.surah_box = QWidget()
+        sb = QVBoxLayout(self.surah_box); sb.setContentsMargins(0, 0, 0, 0)
+        sb.setSpacing(4)
+        self.surah_head = QLabel("THE WHOLE QUR'AN \u2014 all 114 chapters")
+        self.surah_head.setStyleSheet("color:#8be0ff;font-weight:bold;")
+        sb.addWidget(self.surah_head)
+        self.surah_list = QListWidget()
+        self.surah_list.setStyleSheet(
+            "QListWidget{background:#0a1216;border:1px solid #2a4a55;color:#cfe3dd;}"
+            "QListWidget::item:selected{background:#12303a;color:#8be0ff;}")
+        for _s in quran.all_suras():
+            _it = QListWidgetItem(f"{_s['number']:>3}   {_s['name']} \u2014 "
+                                  f"{_s['translation']}  ({len(_s['ayahs'])}v)")
+            _it.setData(Qt.ItemDataRole.UserRole, _s["number"])
+            self.surah_list.addItem(_it)
+        self.b_open_surah = QPushButton("Open the first ayah of the selected chapter")
+        sb.addWidget(self.surah_list, 1)
+        sb.addWidget(self.b_open_surah)
+        self.surah_box.setVisible(False)
+        rv.addWidget(self.surah_box)
         self.codex = QTextBrowser(); self.codex.setOpenExternalLinks(False)
         rv.addWidget(self.codex, 1)
         self.market_panel = QFrame(); self.market_panel.setVisible(False)
@@ -2669,6 +2796,41 @@ class WireVisionTab(QWidget):
         self._menu_visible = False
         self.deck.add_panel(self.market_panel)
         self.deck.place_panel()
+
+        # ---- overlays that float over the world ----
+        # an always-available way out of full screen (the panel bars are hidden there)
+        self.fs_exit = QPushButton("\u2715 exit full screen")
+        self.fs_exit.setToolTip("Leave full screen and bring the panels back (Esc or F11)")
+        self.fs_exit.setStyleSheet(
+            "QPushButton{background:rgba(20,34,40,225);color:#8be0ff;"
+            "border:1px solid #2a4a55;border-radius:4px;padding:6px 12px;}"
+            "QPushButton:hover{background:rgba(32,56,66,240);}")
+        self.fs_exit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.fs_exit.setVisible(False)
+        self.fs_exit.clicked.connect(lambda: self.toggle_fullscreen(False))
+        self.deck.add_overlay(self.fs_exit, "top-center")
+
+        # quick travel + actions for a reader who does not want to fly to a gate
+        self.word_bar = QWidget()
+        wbl = QHBoxLayout(self.word_bar)
+        wbl.setContentsMargins(0, 0, 0, 0); wbl.setSpacing(6)
+        _wbs = ("QPushButton{background:rgba(20,34,40,225);color:#cfe3dd;"
+                "border:1px solid #2a4a55;border-radius:4px;padding:6px 10px;}"
+                "QPushButton:hover{background:rgba(32,56,66,240);}"
+                "QPushButton:disabled{color:#4a6470;}")
+        self.bw_prev = QPushButton("\u25c0 prev ayah")
+        self.bw_next = QPushButton("next ayah \u25b6")
+        self.bw_chapters = QPushButton("\u2637 chapters")
+        self.bw_rand = QPushButton("\u2726 random chapter")
+        self.bw_leave = QPushButton("\u2190 leave the room")
+        for _b in (self.bw_prev, self.bw_next, self.bw_chapters,
+                   self.bw_rand, self.bw_leave):
+            _b.setStyleSheet(_wbs)
+            _b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            wbl.addWidget(_b)
+        self.word_bar.setVisible(False)
+        self.deck.add_overlay(self.word_bar, "bottom-center")
+
         split.addWidget(right)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
@@ -2684,6 +2846,16 @@ class WireVisionTab(QWidget):
         self.gl.agent_selected.connect(self._open_editor)
         self.gl.menu_toggle.connect(self._toggle_menu)
         self.gl.fullscreen_request.connect(self.toggle_fullscreen)
+        self.gl.escape_request.connect(self._escape_fullscreen)
+        self.gl.word_changed.connect(self._refresh_word_ui)
+        self.bw_prev.clicked.connect(lambda: self._word_btn(self.gl.word_prev))
+        self.bw_next.clicked.connect(lambda: self._word_btn(self.gl.word_next))
+        self.bw_chapters.clicked.connect(lambda: self._word_btn(self.gl.word_back_to_chapters))
+        self.bw_rand.clicked.connect(lambda: self._word_btn(self.gl.word_lucky))
+        self.bw_leave.clicked.connect(lambda: self._word_btn(self.gl.word_leave_room))
+        self.b_open_surah.clicked.connect(lambda: self._open_selected_surah())
+        self.surah_list.itemDoubleClicked.connect(lambda _it: self._open_selected_surah())
+        self.surah_list.itemActivated.connect(lambda _it: self._open_selected_surah())
         self.b_new_agent.clicked.connect(self._show_create)
         self.b_close_menu.clicked.connect(lambda: self._set_menu(False))
         self._fs_sc = QShortcut(QKeySequence("F11"), self)
@@ -2695,12 +2867,14 @@ class WireVisionTab(QWidget):
 
     def toggle_fullscreen(self, want=None):
         """Give the world the whole screen: hide this tab's bar + codex, ask the
-        host window to hide its own chrome, and go full screen. Reversible."""
+        host window to hide its own chrome, and go full screen. Reversible — the
+        exit button floats over the world while it is on."""
         self._fs = (not self._fs) if want is None else bool(want)
         self.bar_widget.setVisible(not self._fs)
         self.right.setVisible(not self._fs)
         self.b_full.setText("\u2715 exit full screen" if self._fs
                             else "\u26f6 full screen")
+        self.fs_exit.setVisible(self._fs)
         win = self.window()
         if win is not None:
             if self._fs:
@@ -2708,7 +2882,42 @@ class WireVisionTab(QWidget):
             else:
                 win.showNormal()
         self.fullscreen_changed.emit(self._fs)
+        self.deck.place_overlays()
         self.gl.setFocus()
+
+    def _escape_fullscreen(self):
+        """Esc always gets you out of full screen — never stuck."""
+        if self._fs:
+            self.toggle_fullscreen(False)
+
+    def _word_btn(self, action):
+        action()
+        self.gl.setFocus()
+        self._refresh_word_ui()
+
+    def _open_selected_surah(self):
+        it = self.surah_list.currentItem()
+        if it is None:
+            return
+        self.gl.word_open_surah(int(it.data(Qt.ItemDataRole.UserRole)))
+        self.gl.setFocus()
+
+    def _refresh_word_ui(self):
+        """Show the in-world quick buttons + the chapter list only in the Word."""
+        on = bool(self.gl.word)
+        self.word_bar.setVisible(on)
+        self.surah_box.setVisible(on)
+        if on:
+            select = self.gl.word_mode == "select"
+            self.bw_rand.setVisible(select)
+            self.bw_leave.setVisible(True)
+            self.bw_chapters.setVisible(not select)
+            self.bw_prev.setVisible(not select)
+            self.bw_next.setVisible(not select)
+            self.bw_prev.setEnabled(self.gl._word_has_prev())
+            self.bw_next.setText("finish \u2794 chapters" if self.gl._word_at_end()
+                                 else "next ayah \u25b6")
+        self.deck.place_overlays()
 
     def build(self):
         try:
