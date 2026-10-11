@@ -11,7 +11,7 @@ import json, subprocess, sys, os, signal, time
 from pathlib import Path
 
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QShortcut, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QTextEdit, QPlainTextEdit, QComboBox, QSplitter, QFrame,
@@ -61,12 +61,15 @@ class Fluffy(QMainWindow):
         outer = QVBoxLayout(root)
 
         title = QLabel("MR.FLUFFY"); title.setStyleSheet("font-size:20px;font-weight:bold;color:#c084fc")
+        self._title = title
         outer.addWidget(title)
 
         split = QSplitter(Qt.Orientation.Horizontal)
+        self._split = split
 
         # ---- left: controls + status (channel-agnostic) ----
         left = QWidget(); lv = QVBoxLayout(left)
+        self._left = left
         self.status = QLabel("status: —"); self.status.setWordWrap(True)
         self.budget = QLabel("budget: —"); self.budget.setWordWrap(True)
         self.daemon_state = QLabel("daemon: stopped"); self.daemon_state.setWordWrap(True)
@@ -96,6 +99,9 @@ class Fluffy(QMainWindow):
         self.b_vision = QPushButton("Open wire vision")
         self.b_vision.setToolTip("Walk the wire: the LAN floor, then fall the protocol stack to the last electron")
         lv.addWidget(self.b_vision)
+        self.b_vision_fs = QPushButton("\u26f6 Wire vision full screen")
+        self.b_vision_fs.setToolTip("Give Wire Vision the whole screen (F11) \u2014 hides the panels")
+        lv.addWidget(self.b_vision_fs)
 
         lv.addWidget(_sep())
         self.b_daemon = QPushButton("Start daemon")
@@ -149,6 +155,7 @@ class Fluffy(QMainWindow):
 
         footer = QLabel("Three panels: the News reader (tape), the Wire king (network), and Wire Vision (walk the wire). The game reads local ground truth only — no network, no brain calls.")
         footer.setStyleSheet("color:#9ca3af;font-size:10px")
+        self._footer = footer
         outer.addWidget(footer)
 
         # ---- wiring ----
@@ -163,11 +170,24 @@ class Fluffy(QMainWindow):
         self.b_wire_force.clicked.connect(lambda: self.do_wire_read(force=True))
         self.b_wire_store.clicked.connect(self.do_wire_store)
         self.b_vision.clicked.connect(self.open_vision)
+        self.b_vision_fs.clicked.connect(self.open_vision_fullscreen)
+        if self.vision is not None:
+            self.vision.fullscreen_changed.connect(self._on_vision_fullscreen)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         self.read_done.connect(self._read_done)
         self.wire_read_done.connect(self._wire_read_done)
 
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(15000)
+        self._fs_shortcut = QShortcut(QKeySequence("F11"), self)
+        self._fs_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._fs_shortcut.activated.connect(self._toggle_vision_fullscreen)
         self.refresh()
+
+    def _toggle_vision_fullscreen(self):
+        if self.vision is None:
+            return
+        self.tabs.setCurrentWidget(self.vision_panel)
+        self.vision.toggle_fullscreen()
 
     # ---- data plumbing ----
     def refresh(self):
@@ -352,6 +372,33 @@ class Fluffy(QMainWindow):
         self.vision.build()
         self.status.setText("wire vision: built the playable wire — WASD to move, E to interact")
 
+    def open_vision_fullscreen(self):
+        if self.vision is None:
+            self.status.setText("wire vision unavailable (no OpenGL stack)")
+            return
+        self.tabs.setCurrentWidget(self.vision_panel)
+        self.vision.build()
+        self.vision.toggle_fullscreen(True)
+        self.status.setText("wire vision: full screen — press F11 or \u26f6 to exit")
+
+    def _on_vision_fullscreen(self, on):
+        """Wire Vision asked for the whole screen: hide the app chrome around it."""
+        for w in (self._title, self._left, self._footer):
+            w.setVisible(not on)
+        self.tabs.tabBar().setVisible(not on)
+        self._split.setStretchFactor(0, 0 if on else 1)
+        self._split.setStretchFactor(1, 1)
+        if on:
+            self.status.setText("wire vision: full screen — F11 or \u26f6 to exit")
+        else:
+            self.status.setText("wire vision: panels restored")
+
+    def _on_tab_changed(self, _idx):
+        # leaving the Vision tab always drops full screen, so the app is never stuck
+        if self.vision is not None and getattr(self.vision, "_fs", False):
+            if self.tabs.currentWidget() is not self.vision_panel:
+                self.vision.toggle_fullscreen(False)
+
     def do_wire_store(self):
         r = wireout.store()
         if r.get("stored"):
@@ -413,6 +460,8 @@ class Fluffy(QMainWindow):
         self.b_daemon.setText("Stop daemon")
 
     def closeEvent(self, ev):
+        if self.vision is not None and getattr(self.vision, "_fs", False):
+            self.vision.toggle_fullscreen(False)
         if self._daemon_running():
             try:
                 self._daemon.terminate()

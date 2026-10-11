@@ -190,32 +190,86 @@ that room ... start with small chapters."*
   113 Al-Falaq, 114 An-Naas (28 verses). Data structure accepts any surah.
 - **The sacred rule in code:** nothing is depicted — no Allah, no prophets,
   no companions. The hall draws only a dark disc, a soft centre light-column,
-  faint rings and reader markers; the Word is drawn as words on light, on a
-  reading slab in the HUD (Arabic large, right-aligned; transliteration; the
-  Saheeh International translation), with verse numbers, name, about-line and
-  an honesty footer: "a translation opens a door; it is not the Book."
+  faint rings and reader markers; the Word is drawn as words on light.
 - The room is reached through a gate on the wire floor on its own cleared plaza
   due −x (word wedge added to `wirevision`; devices now spread with a general
-  `_device_angles` helper that keeps all plaza wedges bare). `[` `]` or the
-  wheel turn the page, `Home` or the far gate leaves, and the presence relay
-  shares the hall — "for we are all wired."
+  `_device_angles` helper that keeps all plaza wedges bare). `Home` or the far
+  gate leaves, and the presence relay shares the room — "for we are all wired."
 - Verified headless: 3 home devices at 71.5°/151.4°/288.5° with both wedges
   clear; word gate 11.2 units and market gate 17.7 units from the nearest LAN
-  object; 8 pages; enter → read → page (bracket + wheel) → leave → market still
-  opens → rebuild resets the room cleanly.
+  object; enter → read → leave → market still opens → rebuild resets cleanly.
+
+### 9. The ayah engine — every verse its own world (2026-10-11)
+User: *"...like an engine which makes the world match the meaning of the ayah
+and have the writing written on the sky, another gate which leads to the next
+ayah which then generates another world ... each ayah world should have an exit
+back to surah selection room, which should have a random chapter selection which
+takes you to the first ayah of a random chapter which the user can continue to
+travel through or exit back to the chapters."*
+- New module **`quranworld.py`** — the motif engine. A vocabulary of abstract
+  motifs (mercy, light, lord, worlds, path, time, loss, patience, truth, dawn,
+  darkness, refuge, abundance, one, whisper, anger, water, soul), each a palette
+  + one abstract form + a motion feel. `recipe(surah, ayah)` is **deterministic**
+  (seed `surah:ayah`): keywords in the English translation pick motifs, the
+  surah's base theme is always included, and a primary form + scattered props
+  are laid out. `sky_text(surah, ayah)` returns the authentic Arabic,
+  transliteration, translation and reference. `describe()` gives the honest
+  caption. `quran.py` stays pure scripture — the engine never alters a word.
+- **Two rooms.** Entering Learn Islam now opens a **hall of chapters** (six
+  surah portals on a ring + one bright random-chapter gate). `E` opens the
+  chapter's first ayah; `R` opens a random chapter at its first ayah. Each ayah
+  opens its own generated world. Gates: next ayah (`E`, or `[`/`]`/wheel
+  anywhere), previous ayah, back to the chapters. At a chapter's end, "next"
+  returns to the chapters.
+- **Words on the sky.** In an ayah world the Arabic is shown large at the top of
+  the sky with transliteration, translation and the reference — the ayah held
+  up to be read. HUD caption states plainly: the world is *a reverent impression
+  of the verse's named images, NOT the meaning (which is with Allah)*.
+- Verified headless: hall lists 6 chapters + random gate; open 112 → world with
+  14 props; travel wraps to the chapters at a chapter's end; random lands on a
+  chapter's first ayah; next/prev gates and back-to-chapters all fire; ayah and
+  selection frames render; leave returns to the wire and the market still opens.
+
+### 10. Full screen, and the chapters as a sky of stars (2026-10-11)
+
+- **Wire Vision takes the whole screen.** The Vision tab gained a "⛶ full screen"
+  button (and `F11`); `app.py`'s `Fluffy` gained a "⛶ Wire vision full screen"
+  button. On toggle, the tab hides its own build bar + codex, and the host hides
+  the app's title, side controls, footer and tab bar, so the world alone fills the
+  display. `WireVisionTab.fullscreen_changed(bool)` tells the host what to hide;
+  `F11` or the button restores the panels, and switching away from the Vision tab
+  (or closing) always drops full screen, so the app is never stuck.
+- **The chapter hall became a cluster of stars you fly to.** The selection room is
+  no longer a flat ring: the six small surahs are hung as bright stars over a
+  golden-angle sphere shell (`_word_chapter_pos`, radius `WORD_CLUSTER_R` = 21,
+  heights from `WORD_FLOOR_Y+6` up to `+32`), a lucky-dip star on the central
+  beacon gives the **random chapter** (`_word_random_pos`), and a deterministic
+  280-point star field (`_word_star_points`, seeded) fills the dark. You fly to the
+  star you want and press `E`; `_nearest_word` now measures full 3D distance, and
+  the in-world labels/HUD say "fly to a star". The old flat `WORD_SEL_R` ring and
+  its placement are gone.
+- Verified headless: all six chapter-stars reachable in 3D and each resolves as
+  its surah; the random and leave gates are nearest-detected; the star field is
+  stable across frames; the full-screen toggle round-trips from the in-tab button,
+  the app button, and `F11`, and leaving the tab restores the chrome.
 
 ## Current state (end of 2026-10-11)
 
-- `wiregame.py` + `wirevision.py` modified (floor reorg, market plaza, pad
-  step-off fix); `quran.py` new; `snapshots/config-2026-10-11/` is a dated
-  snapshot of Blackhorse's live configuration (secrets excluded); `AGENTS.md` +
-  `SNAPSHOT.md` updated. This file ships inside the same commit that opened the
-  room of the Word.
+- `wiregame.py` modified again for the ayah engine (word room restructured) and
+  again for full screen + the star-cluster chapter sky; `app.py` modified for
+  full-screen chrome hiding; `quranworld.py` new; `quran.py` unchanged (pure
+  scripture). `AGENTS.md` + `SNAPSHOT.md` updated with these sections.
+- Uncommitted work in the tree: the ayah engine (section 9) and this full-screen +
+  star-cluster work (section 10) are not yet committed; the last snapshot
+  `~/fakegit/mrfluffyv1.6` is behind them.
 - Open threads: (a) make the amber reticle lock/label the nearest real object in
   3D; (b) polish the market further (crowd density, a sounding bell at the centre
   column, the gate glow — all dressing on top of the real snapshot); (c) optionally
   switch the relay to real TLS later (the ghost weave is stdlib-protected, honest
-  about being a weave, not a vow). House rules stand: ground truth only, no
-  invented data, flavour not story; the market's platforms/balance/crowd are
-  real, the floor and colours are dressing; the Quran room's text is a faithful
-  local copy of the mushaf and nothing in it is ever depicted.
+  about being a weave, not a vow); (d) grow the chapter list straight from the
+  mushaf and let surah themes/motifs be tuned. House rules stand: ground truth
+  only, no invented data, flavour not story; the market's platforms/balance/crowd
+  are real, the floor and colours are dressing; the Quran room's text is a
+  faithful local copy of the mushaf, nothing in it is ever depicted, and each
+  generated world is an honest impression of the verse's named images — never a
+  claim about its meaning.

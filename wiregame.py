@@ -17,11 +17,11 @@ default; the real term is one keypress away ('T'), so nobody is left behind.
 Standalone:  python3 wiregame.py
 """
 from __future__ import annotations
-import math, sys, time, hashlib
+import math, random, sys, time, hashlib
 
 from PyQt6.QtCore import Qt, QRect, QTimer, pyqtSignal
 from PyQt6.QtGui import (QColor, QFont, QPainter, QPen, QSurfaceFormat, QCursor,
-                         QRadialGradient)
+                         QRadialGradient, QShortcut, QKeySequence)
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel,
@@ -35,17 +35,25 @@ from OpenGL.GLU import *
 import wirevision
 import wiregate
 import quran
+import quranworld
 from wiregate import MARKET_FLOOR_Y, MARKET_R, RETURN_GATE_POS
 
 MARKET_GATE_POS = [23.0, 0.06, 0.0]   # the tall portal to BlackHorse — its own cleared plaza, due +x
 
 # the room of the Word (Learn Islam): a calm hall on the far side, due −x.
-# No image, nothing depicted — the room holds only scripture on light.
+# No image, nothing depicted — the room holds only scripture on light. From the
+# hall you choose a chapter; each ayah then opens as its own world of abstract
+# forms keyed to the images named in the verse (never the meaning, which is with
+# Allah). The ayah is written on the sky, and gates lead on to the next world,
+# back to the previous one, or back to the chapters.
 WORD_GATE_POS = [-23.0, 0.06, 0.0]
 WORD_FLOOR_Y = -66.0
 WORD_R = 30.0
-WORD_RETURN_POS = [0.0, WORD_FLOOR_Y + 6.0, WORD_R - 7.0]
-WORD_VERSE_PER_PAGE = 5
+WORD_RETURN_POS = [0.0, WORD_FLOOR_Y + 6.0, WORD_R - 7.0]   # gate back to the wire
+WORD_CLUSTER_R = 21.0        # radius of the sphere of chapter-stars you fly between
+WORD_NEXT_ANGLE = 0.0        # gate to the next ayah, due +x
+WORD_PREV_ANGLE = math.pi * 0.5   # gate to the previous ayah
+WORD_BACK_ANGLE = math.pi    # gate back to the chapters
 
 # index: 0 floor, 1..5 = protocol strata (top -> bottom)
 STRATA_Y = [0.0, -10.0, -20.0, -30.0, -40.0, -50.0]
@@ -133,6 +141,7 @@ class WireGLWidget(QOpenGLWidget):
     market_closed = pyqtSignal()
     agent_selected = pyqtSignal(object)        # an agent dict (one platform)
     menu_toggle = pyqtSignal(bool)             # show/hide the market menu
+    fullscreen_request = pyqtSignal()          # F11 — the tab owns full screen
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -161,8 +170,11 @@ class WireGLWidget(QOpenGLWidget):
         self._beat = 0.0
         # the room of the Word — Learn Islam, read in the wire (no imagery)
         self.word = False
-        self._word_pages = []
-        self.word_page = 0
+        self.word_mode = "select"        # "select" (chapters) | "ayah" (a world)
+        self.word_ref = None             # (surah number, ayah index) in a world
+        self._word_reci = None           # the recipe of the current ayah world
+        self._word_suras = []
+        self._word_stars = None          # lazily-built decorative star field
         self._last_t = time.time()
         self._hud_msg = ""
         self._hud_until = 0.0
@@ -224,8 +236,10 @@ class WireGLWidget(QOpenGLWidget):
         self.selected_agent = None
         self.selected = None
         self.word = False
-        self._word_pages = []
-        self.word_page = 0
+        self.word_mode = "select"
+        self.word_ref = None
+        self._word_reci = None
+        self._word_suras = []
         self.pos = [0.0, EYE, 10.0]
         self.yaw = 0.0
         self.pitch = -0.05
@@ -857,6 +871,12 @@ class WireGLWidget(QOpenGLWidget):
             self._word_move(1)
         elif k == Qt.Key.Key_T:
             self.show_real = not self.show_real
+        elif k == Qt.Key.Key_R:
+            if self.word:
+                if self.word_mode == "select":
+                    self._word_random()
+                else:
+                    self._word_to_select()
         elif k == Qt.Key.Key_H:
             self.menu_toggle.emit(True)
         elif k == Qt.Key.Key_Home:
@@ -870,6 +890,8 @@ class WireGLWidget(QOpenGLWidget):
                 self._go_surface()
         elif k == Qt.Key.Key_G:
             self._toggle_fly()
+        elif k == Qt.Key.Key_F11:
+            self.fullscreen_request.emit()
         else:
             self.keys.add(k)
         super().keyPressEvent(e)
@@ -879,7 +901,7 @@ class WireGLWidget(QOpenGLWidget):
         super().keyReleaseEvent(e)
 
     def wheelEvent(self, e):
-        if self.word and self._word_pages:
+        if self.word and self.word_mode == "ayah":
             self._word_move(1 if e.angleDelta().y() < 0 else -1)
             return
         super().wheelEvent(e)
@@ -1189,32 +1211,110 @@ class WireGLWidget(QOpenGLWidget):
                 return a
         return None
 
-    # ---- the room of the Word (Learn Islam): scripture on light ------------
-    def _build_word_pages(self):
-        pages = []
-        for s in quran.all_suras():
-            n_ay = len(s["ayahs"])
-            for start in range(0, n_ay, WORD_VERSE_PER_PAGE):
-                pages.append({
-                    "surah": s,
-                    "start": start,
-                    "end": min(start + WORD_VERSE_PER_PAGE, n_ay),
-                    "part": start + 1,
-                })
-        return pages
+    # ---- the room of the Word: chapters hall + a world for each ayah --------
+    def _word_gate_xy(self, angle):
+        rr = WORD_R - 6.0
+        return (rr * math.cos(angle), rr * math.sin(angle))
+
+    def _word_surah_by_number(self, n):
+        for s in self._word_suras:
+            if s["number"] == n:
+                return s
+        return None
+
+    def _word_chapter_pos(self, i, n):
+        """Where chapter i hangs among the stars — a golden-angle spread over a
+        sphere shell, so the cluster always looks like the same sky and you fly
+        from star to star to reach a chapter."""
+        ga = 2.399963229728653               # the golden angle
+        yf = (i + 0.5) / max(1, n)
+        y = WORD_FLOOR_Y + 6.0 + 26.0 * yf
+        rr = math.sqrt(max(0.0, 1.0 - (2.0 * yf - 1.0) ** 2))
+        a = i * ga
+        R = WORD_CLUSTER_R
+        return (R * rr * math.cos(a), y, R * rr * math.sin(a))
+
+    def _word_random_pos(self):
+        return (0.0, WORD_FLOOR_Y + 20.0, 0.0)
+
+    def _word_star_points(self):
+        """A fixed field of small stars to fly through — atmosphere, nothing more."""
+        if self._word_stars is None:
+            rnd = random.Random(20261011)
+            pts = []
+            for _ in range(280):
+                a = rnd.random() * 2 * math.pi
+                rr = (WORD_R - 3.0) * math.sqrt(rnd.random())
+                y = WORD_FLOOR_Y + 1.5 + rnd.random() * 46.0
+                pts.append((rr * math.cos(a), y, rr * math.sin(a),
+                            rnd.random() * 6.283, 0.6 + rnd.random() * 1.6))
+            self._word_stars = pts
+        return self._word_stars
+
+    def _word_to_select(self, start=False, quiet=False):
+        """Open (or return to) the hall of chapters."""
+        self.word_mode = "select"
+        self.word_ref = None
+        self._word_reci = None
+        self.pos = [0.0, WORD_FLOOR_Y + EYE, WORD_R - 11.0]
+        self.yaw = 0.0
+        self.pitch = -0.04
+        if start:
+            self._flash("LEARN ISLAM \u2014 a cluster of chapters, hung like stars. "
+                        "Fly to a star and press E \u00b7 R opens a random chapter")
+        elif not quiet:
+            self._flash("back to the cluster of chapters \u2014 fly to another star, "
+                        "or leave by the far gate")
+        self.update()
+
+    def _word_enter_ayah(self, surah, idx):
+        """Step into the world of one ayah — its text written on the sky."""
+        ay = surah["ayahs"]
+        idx = max(0, min(idx, len(ay) - 1))
+        self.word_mode = "ayah"
+        self.word_ref = (surah["number"], idx)
+        self._word_reci = quranworld.recipe(surah, ay[idx])
+        self.pos = [0.0, WORD_FLOOR_Y + EYE, WORD_R - 11.0]
+        self.yaw = 0.0
+        self.pitch = 0.05
+        self._flash(f"{surah['number']}:{ay[idx]['n']}  \u00b7  {surah['name']}  "
+                    f"\u00b7  [ ] travel the ayah \u00b7 R the chapters")
 
     def _word_move(self, d):
-        if not self.word or not self._word_pages:
+        """[ ] / scroll — travel ayah by ayah; the end returns to the chapters."""
+        if not self.word or self.word_mode != "ayah" or not self.word_ref:
             return
-        n = len(self._word_pages)
-        self.word_page = (self.word_page + d) % n
-        pg = self._word_pages[self.word_page]
-        s = pg["surah"]
-        title = f"{s['number']} \u00b7 {s['name']} \u2014 {s['translation']}"
-        if n > 1:
-            title = f"{title}  (verses {pg['start'] + 1}\u2013{pg['end']})"
-        self._flash(title)
-        self.update()
+        num, idx = self.word_ref
+        surah = self._word_surah_by_number(num)
+        if surah is None:
+            return
+        nxt = idx + d
+        if nxt < 0:
+            self._flash("this is the first ayah of the chapter")
+            return
+        if nxt >= len(surah["ayahs"]):
+            self._flash("the chapter is complete \u2014 back to the chapters")
+            self._word_to_select(quiet=True)
+            return
+        self._word_enter_ayah(surah, nxt)
+
+    def _word_random(self):
+        """A random chapter, opening at its first ayah — travel on from there."""
+        if not self._word_suras:
+            self._word_suras = quran.all_suras()
+        s = random.choice(self._word_suras)
+        self._word_enter_ayah(s, 0)
+        self._flash(f"a random chapter \u2014 {s['number']} {s['name']} "
+                    f"({s['translation']}) \u00b7 [ ] travel on \u00b7 R the chapters")
+
+    def _word_has_prev(self):
+        return bool(self.word_ref) and self.word_ref[1] > 0
+
+    def _word_at_end(self):
+        if not self.word_ref:
+            return False
+        surah = self._word_surah_by_number(self.word_ref[0])
+        return bool(surah) and self.word_ref[1] >= len(surah["ayahs"]) - 1
 
     def _enter_word(self):
         if self.presence is None:
@@ -1230,21 +1330,16 @@ class WireGLWidget(QOpenGLWidget):
         self.active = 0
         self._beat = 0.0
         self._peers = self.presence.peers() if self.presence else []
-        self._word_pages = self._build_word_pages()
-        self.word_page = 0
-        self.pos = [0.0, WORD_FLOOR_Y + EYE, WORD_R - 11.0]
-        self.yaw = 0.0
-        self.pitch = -0.05
-        s = self._word_pages[0]["surah"]
-        self._flash(f"LEARN ISLAM \u2014 the Qur'an read as a room in the wire "
-                    f"\u00b7 {s['number']} {s['name']} \u00b7 [ ] turn the page "
-                    f"\u00b7 Home leave")
+        self._word_suras = quran.all_suras()
+        self._word_to_select(start=True)
 
     def _leave_word(self):
         was = self.word
         self.word = False
-        self._word_pages = []
-        self.word_page = 0
+        self.word_mode = "select"
+        self.word_ref = None
+        self._word_reci = None
+        self._word_suras = []
         self.selected_agent = None
         self.selected = None
         self.flying = False
@@ -1302,50 +1397,76 @@ class WireGLWidget(QOpenGLWidget):
             self._ghost_line = self.presence.describe()
 
     def _word_sky(self):
-        glClearColor(0.004, 0.008, 0.013, 1.0)
+        if self.word_mode == "ayah" and self._word_reci:
+            sky = self._word_reci["sky"]
+            glClearColor(sky[0], sky[1], sky[2], 1.0)
+        else:
+            glClearColor(0.006, 0.012, 0.020, 1.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         y = WORD_FLOOR_Y
         glLineWidth(1.0)
-        glColor4f(0.05, 0.09, 0.12, 1.0)
+        glColor4f(0.06, 0.10, 0.14, 1.0)
         glBegin(GL_LINE_LOOP)
-        for i in range(48):
-            a = 2 * math.pi * i / 48
+        for i in range(64):
+            a = 2 * math.pi * i / 64
             glVertex3f((WORD_R - 1.0) * math.cos(a), y + 0.02,
                        (WORD_R - 1.0) * math.sin(a))
         glEnd()
         glLineWidth(1.0)
 
-    def _draw_word(self, t):
+    def _word_floor(self, ground):
         y = WORD_FLOOR_Y
-        # a calm floor, deep ink, faint concentric rings — quiet enough to read
-        glColor4f(0.014, 0.022, 0.030, 1.0)
+        glColor4f(ground[0], ground[1], ground[2], 1.0)
         glBegin(GL_TRIANGLE_FAN)
         glVertex3f(0, y, 0)
-        for i in range(33):
-            a = 2 * math.pi * i / 32
+        for i in range(49):
+            a = 2 * math.pi * i / 48
             glVertex3f(WORD_R * math.cos(a), y, WORD_R * math.sin(a))
         glEnd()
+
+    def _draw_word(self, t):
+        if self.word_mode == "ayah" and self._word_reci:
+            self._draw_word_ayah(t)
+        else:
+            self._draw_word_select(t)
+
+    def _draw_word_select(self, t):
+        y = WORD_FLOOR_Y
+        self._word_floor((0.008, 0.014, 0.024))
         glLineWidth(1.0)
-        for r in (8, 16, 24):
-            glColor4f(0.05, 0.11, 0.14, 1.0)
+        for r in (9, 17, 25):
+            glColor4f(0.05, 0.10, 0.15, 1.0)
             glBegin(GL_LINE_LOOP)
-            for i in range(40):
-                a = 2 * math.pi * i / 40
+            for i in range(48):
+                a = 2 * math.pi * i / 48
                 glVertex3f(r * math.cos(a), y + 0.03, r * math.sin(a))
             glEnd()
         glLineWidth(1.0)
-        # the light you read by: a soft column at the centre, no figure on it
-        breathe = 1.0 + 0.10 * math.sin(t * 1.1)
-        self._prism(0, 0, 2.4 * breathe, 0.9, y, y + 16.0, 6,
-                    (0.10, 0.34, 0.40))
-        self._octa(0, y + 9.5, 0, 1.7 * breathe, (0.30, 0.66, 0.72), squash=1.3)
-        glColor4f(0.55, 0.85, 0.90, 0.30)
-        glBegin(GL_LINE_LOOP)
-        for i in range(64):
-            a = 2 * math.pi * i / 64
-            glVertex3f(7.2 * math.cos(a + t * 0.15), y + 0.35,
-                       7.2 * math.sin(a + t * 0.15))
+        # the cluster: a field of small stars you fly through
+        glPointSize(2.0)
+        glBegin(GL_POINTS)
+        for (x, yy, z, ph, sz) in self._word_star_points():
+            tw = 0.55 + 0.45 * math.sin(t * 1.4 + ph)
+            glColor4f(0.15 + 0.55 * tw, 0.12 + 0.62 * tw, 0.10 + 0.80 * tw, 0.9)
+            glVertex3f(x, yy, z)
         glEnd()
+        glPointSize(1.0)
+        # the beacon you launch from: a still column with the lucky-dip star on top
+        breathe = 1.0 + 0.08 * math.sin(t * 1.0)
+        self._prism(0, 0, 1.4 * breathe, 0.5, y, y + 20.0, 6, (0.07, 0.24, 0.30))
+        rx, ry, rz = self._word_random_pos()
+        glow = 1.0 + 0.14 * math.sin(t * 1.6)
+        self._octa(rx, ry, rz, 3.0 * glow, (0.30, 0.62, 0.52), squash=0.5)
+        self._sphere(rx, ry, rz, 1.6 * glow, (0.62, 0.90, 0.72))
+        self._portal(rx, rz, ry - 2.8, 2.6, (0.60, 0.88, 0.72), t + 0.4)
+        # the chapters, each a bright star in the cluster
+        n = max(1, len(self._word_suras))
+        for i, s in enumerate(self._word_suras):
+            x, yy, z = self._word_chapter_pos(i, n)
+            tw = 1.0 + 0.16 * math.sin(t * 1.8 + i)
+            self._octa(x, yy, z, 2.8 * tw, (0.24, 0.48, 0.60), squash=0.45)
+            self._sphere(x, yy, z, 1.4 * tw, (0.72, 0.86, 0.98))
+            self._portal(x, z, yy - 2.6, 2.4, (0.48, 0.78, 0.86), t + i * 0.9)
         # other readers, announced over the relay — learning together
         for p in self._peers:
             self._draw_peer(p, t)
@@ -1355,13 +1476,208 @@ class WireGLWidget(QOpenGLWidget):
         self._portal(rx, rz, ry + 2.0, 1.8, (0.32, 0.56, 0.70), t + 1.6)
         glLineWidth(1.0)
 
+    def _draw_word_ayah(self, t):
+        y = WORD_FLOOR_Y
+        r = self._word_reci
+        self._word_floor(r["ground"])
+        glLineWidth(1.0)
+        for pr in r["props"]:
+            self._motif_form(pr["kind"], pr["x"], y, pr["z"], pr["s"], pr["col"],
+                             t, pr["ph"], pr.get("central", False))
+        for p in self._peers:
+            self._draw_peer(p, t)
+        # gates: next ayah (+x), previous ayah (+z), back to the chapters (−x)
+        nx, nz = self._word_gate_xy(WORD_NEXT_ANGLE)
+        bx, bz = self._word_gate_xy(WORD_BACK_ANGLE)
+        self._portal(nx, nz, y + 0.5, 2.6, r["ring"], t + 0.3)
+        if self._word_has_prev():
+            px, pz = self._word_gate_xy(WORD_PREV_ANGLE)
+            self._portal(px, pz, y + 0.5, 2.4, (0.50, 0.60, 0.80), t + 1.1)
+        self._portal(bx, bz, y + 0.5, 2.8, (0.55, 0.80, 0.70), t + 1.9)
+        glLineWidth(1.0)
+
+    def _motif_form(self, kind, x, y, z, s, c, t, ph, central=False):
+        """One abstract form from the motif vocabulary. Nothing here is a figure."""
+        if kind == "ring":
+            glColor4f(c[0], c[1], c[2], 0.85)
+            glBegin(GL_LINE_LOOP)
+            for i in range(64):
+                a = 2 * math.pi * i / 64
+                glVertex3f(x + s * math.cos(a), y + 0.04, z + s * math.sin(a))
+            glEnd()
+        elif kind == "column":
+            h = 16.0 * s
+            self._prism(x, z, 1.1 * s, 0.7 * s, y, y + h, 6,
+                        (c[0] * 0.35, c[1] * 0.35, c[2] * 0.45))
+            self._octa(x, y + h * 0.5, z, 1.5 * s, c, squash=1.6)
+            self._octa(x, y + h + 0.6 * s, z, 1.0 * s, c, squash=1.2)
+        elif kind == "beam":
+            h = 20.0 * s
+            glColor4f(c[0], c[1], c[2], 0.32)
+            glBegin(GL_TRIANGLE_STRIP)
+            for dy in (0.0, h):
+                wdt = 2.4 * s * (1.0 - dy / h * 0.6)
+                glVertex3f(x - wdt, y + dy, z)
+                glVertex3f(x + wdt, y + dy, z)
+            glEnd()
+            self._octa(x, y + 3.0 * s, z, 1.3 * s, c, squash=1.1)
+        elif kind == "canopy":
+            for k in range(3):
+                rr = (5.0 + k * 3.0) * s
+                glColor4f(c[0], c[1], c[2], 0.5 - k * 0.12)
+                glBegin(GL_LINE_LOOP)
+                for i in range(48):
+                    a = math.pi * i / 47
+                    glVertex3f(x + rr * math.cos(a + ph), y + 8.0 * s + k * 1.2,
+                               z + rr * math.sin(a + ph) * 0.6)
+                glEnd()
+            self._octa(x, y + 2.0 * s, z, 1.2 * s, c, squash=1.0)
+        elif kind == "orb":
+            self._sphere(x, y + 6.0 * s + 0.6 * math.sin(t + ph), z, 2.2 * s, c)
+            if central:
+                for k in range(3):
+                    a = t * 0.4 + ph + k * 2.09
+                    self._sphere(x + 5.0 * s * math.cos(a),
+                                 y + 6.0 * s + 1.4 * math.sin(a),
+                                 z + 5.0 * s * math.sin(a), 0.7 * s,
+                                 (c[0] * 0.8, c[1] * 0.8, c[2] * 0.9))
+        elif kind == "orbs":
+            for k in range(6):
+                a = ph + k * 1.05
+                rr = (3.0 + 1.4 * k) * s
+                self._sphere(x + rr * math.cos(a),
+                             y + 3.0 + 2.0 * k * s + 0.5 * math.sin(t + k),
+                             z + rr * math.sin(a), 0.6 * s, c)
+        elif kind == "path":
+            for k in range(7):
+                fr = k / 6.0
+                zz = z + (fr - 0.5) * 18.0 * s
+                self._octa(x, y + 0.4, zz, (0.9 - 0.4 * fr) * s,
+                           (c[0] * (0.5 + fr), c[1] * (0.5 + fr),
+                            c[2] * (0.5 + fr)), squash=0.4)
+        elif kind == "hourglass":
+            self._cone(x, y + 6.0 * s, z, 2.2 * s, 5.0 * s, c)
+            glPushMatrix()
+            glTranslatef(x, y + 11.0 * s, z)
+            glScalef(1.0, -1.0, 1.0)
+            self._cone(0, 0, 0, 2.2 * s, 5.0 * s, c)
+            glPopMatrix()
+            glPointSize(2.0)
+            glColor4f(c[0], c[1], c[2], 0.9)
+            glBegin(GL_POINTS)
+            for k in range(10):
+                fy = (t * 3.0 + k * 0.7) % 6.0
+                glVertex3f(x + 0.3 * math.sin(k), y + 11.0 * s - fy, z)
+            glEnd()
+            glPointSize(1.0)
+        elif kind == "faded":
+            for k in range(4):
+                h = (2.0 + k * 1.5) * s
+                glColor4f(c[0], c[1], c[2], 0.14 + 0.12 * k)
+                self._prism(x + (k - 1.5) * 2.0 * s, z + (k - 1.5) * 1.5 * s,
+                            0.6 * s, 0.3 * s, y, y + h, 5,
+                            (c[0] * 0.6, c[1] * 0.6, c[2] * 0.6))
+        elif kind == "ripple":
+            for k in range(3):
+                rr = ((t * 2.5 + k * 4.0 + ph) % 12.0) * s
+                glColor4f(c[0], c[1], c[2], max(0.0, 0.6 - rr * 0.04))
+                glBegin(GL_LINE_LOOP)
+                for i in range(48):
+                    a = 2 * math.pi * i / 48
+                    glVertex3f(x + rr * math.cos(a), y + 0.05, z + rr * math.sin(a))
+                glEnd()
+            self._octa(x, y + 1.5 * s, z, 1.0 * s, c, squash=1.0)
+        elif kind == "arc":
+            glColor4f(c[0], c[1], c[2], 0.7)
+            glLineWidth(2.0)
+            glBegin(GL_LINE_STRIP)
+            for i in range(33):
+                a = math.pi * i / 32
+                glVertex3f(x + 6.0 * s * math.cos(a + ph),
+                           y + 5.0 * s * math.sin(a) + 0.5, z)
+            glEnd()
+            glLineWidth(1.0)
+        elif kind == "dim":
+            self._sphere(x, y + 4.0 * s + 0.3 * math.sin(t * 0.6 + ph), z, 2.0 * s,
+                         (c[0] * 0.6, c[1] * 0.6, c[2] * 0.7))
+        elif kind == "motes":
+            glPointSize(2.0)
+            glColor4f(c[0], c[1], c[2], 0.8)
+            glBegin(GL_POINTS)
+            for k in range(24):
+                a = ph + k * 0.9
+                rr = (2.0 + (k % 6) * 1.3) * s
+                yy2 = y + 2.0 + ((t * 1.5 + k * 0.6) % 12.0)
+                glVertex3f(x + rr * math.cos(a), yy2, z + rr * math.sin(a))
+            glEnd()
+            glPointSize(1.0)
+        elif kind == "ember":
+            self._cone(x, y + 2.0 * s, z, 1.4 * s, 4.0 * s, c)
+            glPointSize(2.0)
+            glColor4f(c[0], c[1] * 0.8, c[2] * 0.7, 0.9)
+            glBegin(GL_POINTS)
+            for k in range(16):
+                fy = (t * 4.0 + k * 0.9) % 8.0
+                glVertex3f(x + 0.8 * math.sin(k * 1.7), y + 2.0 + fy,
+                           z + 0.8 * math.cos(k))
+            glEnd()
+            glPointSize(1.0)
+        elif kind == "pool":
+            glColor4f(c[0], c[1], c[2], 0.35)
+            glBegin(GL_TRIANGLE_FAN)
+            glVertex3f(x, y + 0.06, z)
+            for i in range(33):
+                a = 2 * math.pi * i / 32
+                glVertex3f(x + 3.0 * s * math.cos(a), y + 0.06,
+                           z + 3.0 * s * math.sin(a))
+            glEnd()
+            glColor4f(c[0], c[1], c[2], 0.8)
+            glBegin(GL_LINE_LOOP)
+            for i in range(40):
+                a = 2 * math.pi * i / 40
+                glVertex3f(x + 3.0 * s * math.cos(a), y + 0.08,
+                           z + 3.0 * s * math.sin(a))
+            glEnd()
+            self._octa(x, y + 1.4 * s, z, 0.9 * s, c, squash=1.0)
+        elif kind == "heart":
+            pulse = 1.0 + 0.18 * math.sin(t * 2.2 + ph)
+            self._octa(x, y + 5.0 * s, z, 1.8 * s * pulse, c, squash=1.3)
+            self._prism(x, z, 0.7 * s, 0.4 * s, y, y + 3.0 * s, 5,
+                        (c[0] * 0.4, c[1] * 0.4, c[2] * 0.5))
+        else:
+            self._octa(x, y + 2.0 * s, z, 1.0 * s, c, squash=1.0)
+
     def _word_labels(self):
         out = []
         vp = glGetIntegerv(GL_VIEWPORT)
         items = []
-        rx, ry, rz = WORD_RETURN_POS
-        items.append((rx, ry + 2.4, rz, "leave the room of the Word [E] "
-                                       "\u2014 back to the wire", (0.72, 0.92, 1.0)))
+        if self.word_mode == "ayah" and self.word_ref:
+            nx, nz = self._word_gate_xy(WORD_NEXT_ANGLE)
+            bx, bz = self._word_gate_xy(WORD_BACK_ANGLE)
+            nxt = ("the chapter ends \u2014 back to the chapters [E]"
+                   if self._word_at_end() else "travel to the next ayah [E]")
+            items.append((nx, WORD_FLOOR_Y + 6.2, nz, nxt, (0.85, 0.95, 1.0)))
+            if self._word_has_prev():
+                px, pz = self._word_gate_xy(WORD_PREV_ANGLE)
+                items.append((px, WORD_FLOOR_Y + 6.2, pz,
+                              "back to the previous ayah [E]", (0.72, 0.82, 0.95)))
+            items.append((bx, WORD_FLOOR_Y + 6.2, bz,
+                          "back to the chapters [E]", (0.70, 0.92, 0.80)))
+        else:
+            n = max(1, len(self._word_suras))
+            for i, s in enumerate(self._word_suras):
+                x, yy, z = self._word_chapter_pos(i, n)
+                items.append((x, yy + 2.6, z,
+                              f"{s['number']} \u00b7 {s['name']} \u2014 "
+                              f"{s['translation']} ({len(s['ayahs'])} verses) [E]",
+                              (0.72, 0.92, 1.0)))
+            rx, ry, rz = self._word_random_pos()
+            items.append((rx, ry + 3.0, rz,
+                          "a random chapter [E]", (0.72, 1.0, 0.82)))
+            lx, ly, lz = WORD_RETURN_POS
+            items.append((lx, ly + 2.4, lz,
+                          "leave the room of the Word [E] \u2014 back to the wire",
+                          (0.72, 0.92, 1.0)))
         for p in self._peers:
             items.append((p["x"], p["y"] + 2.0, p["z"], f"\u25c8 {p['name']}",
                           self._peer_col(p["name"])))
@@ -1661,11 +1977,35 @@ class WireGLWidget(QOpenGLWidget):
         return best
 
     def _nearest_word(self):
-        rx, rz = WORD_RETURN_POS[0], WORD_RETURN_POS[2]
-        d = math.hypot(self.pos[0] - rx, self.pos[2] - rz)
-        if d <= 5.0:
-            return {"kind": "leave_word", "d": d}
-        return None
+        px, py, pz = self.pos
+        best = None
+
+        def consider(kind, x, y, z, radius, **kw):
+            nonlocal best
+            d = math.sqrt((px - x) ** 2 + (py - y) ** 2 + (pz - z) ** 2)
+            if d <= radius and (best is None or d < best["d"]):
+                best = {"kind": kind, "d": d, **kw}
+
+        if self.word_mode == "ayah" and self.word_ref:
+            fy = WORD_FLOOR_Y
+            nx, nz = self._word_gate_xy(WORD_NEXT_ANGLE)
+            bx, bz = self._word_gate_xy(WORD_BACK_ANGLE)
+            consider("word_next", nx, fy, nz, 5.5)
+            if self._word_has_prev():
+                px2, pz2 = self._word_gate_xy(WORD_PREV_ANGLE)
+                consider("word_prev", px2, fy, pz2, 5.5)
+            consider("word_chapters", bx, fy, bz, 5.5)
+            return best
+        # the cluster of chapters
+        n = max(1, len(self._word_suras))
+        for i, s in enumerate(self._word_suras):
+            x, y, z = self._word_chapter_pos(i, n)
+            consider("word_surah", x, y, z, 6.0, surah=s)
+        x, y, z = self._word_random_pos()
+        consider("word_random", x, y, z, 6.0)
+        consider("word_leave", WORD_RETURN_POS[0], WORD_RETURN_POS[1],
+                 WORD_RETURN_POS[2], 5.5)
+        return best
 
     def _interact(self):
         n = self._nearest()
@@ -1684,7 +2024,17 @@ class WireGLWidget(QOpenGLWidget):
                 self._leave_market()
             return
         if self.word:
-            if n["kind"] == "leave_word":
+            if n["kind"] == "word_surah":
+                self._word_enter_ayah(n["surah"], 0)
+            elif n["kind"] == "word_random":
+                self._word_random()
+            elif n["kind"] == "word_next":
+                self._word_move(1)
+            elif n["kind"] == "word_prev":
+                self._word_move(-1)
+            elif n["kind"] == "word_chapters":
+                self._word_to_select()
+            elif n["kind"] == "word_leave":
                 self._leave_word()
             return
         if self.flying and n["kind"] in ("gate", "well", "up", "electron", "ruin"):
@@ -1887,109 +2237,180 @@ class WireGLWidget(QOpenGLWidget):
         pr.setPen(QColor(150, 235, 225))
         pr.drawText(14, 22, "SECTION 9  //  WIRE VISION  \u2014  LEARN ISLAM")
         pr.setPen(QColor(105, 165, 175))
-        pr.drawText(14, 36, "the Qur'an, read as a room in the wire \u00b7 nothing is depicted "
-                            "here \u2014 not Allah, not the prophets, not the companions")
-        pr.drawText(14, 50, "only the words, on light \u00b7 others may join you here, "
-                            "for we are all wired")
+        pr.drawText(14, 36, "nothing is depicted here \u2014 not Allah, not the prophets, "
+                            "not the companions; only the words, on light")
+        pr.drawText(14, 50, "each ayah is a world of abstract forms keyed to the images "
+                            "named in the verse, and the words are written on the sky")
         # reader count + ghost layer (top-right)
         n = len(self._peers)
         online = self._online or n > 0
         pr.setPen(QColor(160, 190, 210))
-        msg = (f"relay online \u00b7 {n} other reader{'' if n == 1 else 's'} in the hall"
-               if online else "alone in the hall \u00b7 no other reader on the relay")
+        msg = (f"relay online \u00b7 {n} other reader{'' if n == 1 else 's'} in the room"
+               if online else "alone in the room \u00b7 no other reader on the relay")
         pr.drawText(w_ - fm.horizontalAdvance(msg) - 14, 22, msg)
         ghost = self._ghost_line or "ghost layer: open \u00b7 set MRFLUFFY_WIRE_KEY on relay + players"
         pr.setPen(QColor(160, 190, 210) if "hardened" in ghost else QColor(200, 170, 90))
         pr.drawText(w_ - fm.horizontalAdvance(ghost[:116]) - 14, 38, ghost[:116])
-        # ---- the reading slab ----
-        if not self._word_pages:
-            return
-        pg = self._word_pages[self.word_page]
-        s = pg["surah"]
-        x0, x1 = int(w_ * 0.09), int(w_ - w_ * 0.09)
-        y0, y1 = 128, h_ - 168
-        pr.fillRect(x0, y0, x1 - x0, y1 - y0, QColor(7, 15, 21, 228))
-        pr.setPen(QColor(38, 84, 96))
-        pr.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
-        pr.drawText(x0 + 16, y1 - 10, "THE WORD")
+
+        if self.word_mode == "ayah" and self.word_ref:
+            surah = self._word_surah_by_number(self.word_ref[0])
+            if surah:
+                ay = surah["ayahs"][self.word_ref[1]]
+                self._hud_word_ayah(pr, now, w_, h_, surah, ay)
+        else:
+            self._hud_word_select(pr, now, w_, h_)
+
+        # ---- in-world labels over the gates and portals ----
         pr.setFont(mono)
-        # header line
-        pr.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
-        pr.setPen(QColor(140, 225, 215))
-        title = (f"SURAH {s['number']}  \u00b7  {s['name']}  \u2014  "
-                 f"{s['translation']}   \u00b7   {s['arabic_name']}   "
-                 f"\u00b7   {'MECCAN' if s.get('meccan') else 'MEDINAN'}")
-        pr.drawText(x0 + 16, y0 + 24, title)
-        pr.setFont(mono)
-        # about + page marker
-        pr.setPen(QColor(140, 165, 175))
-        part = f"verses {pg['start'] + 1}\u2013{pg['end']} of {len(s['ayahs'])}"
-        pr.drawText(x0 + 16, y0 + 44, f"{part}   \u00b7   {s['about']}")
-        # the verses themselves
-        yy = y0 + 72
-        ar_f = QFont("Sans Serif", 17)
-        tr_f = QFont("Monospace", 12)
-        tr_f.setItalic(True)
-        en_f = QFont("Serif", 15)
-        for a in s["ayahs"][pg["start"]:pg["end"]]:
-            if yy > y1 - 4:
-                break
-            ar_r = QRect(x0 + 16, yy, x1 - x0 - 32, 30)
-            pr.setFont(ar_f)
-            pr.setPen(QColor(230, 236, 240))
-            pr.drawText(ar_r, int(Qt.AlignmentFlag.AlignRight)
-                        | int(Qt.AlignmentFlag.AlignTop), a["ar"])
-            pr.setFont(QFont("Monospace", 11))
-            pr.setPen(QColor(120, 235, 160))
-            pr.drawText(ar_r, int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignTop),
-                        f"({a['n']})")
-            yy += 30
-            pr.setFont(tr_f)
-            pr.setPen(QColor(150, 175, 185))
-            pr.drawText(QRect(x0 + 16, yy, x1 - x0 - 32, 20),
-                        int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignTop),
-                        a["tr"])
-            yy += 21
-            pr.setFont(en_f)
-            pr.setPen(QColor(215, 225, 230))
-            pr.drawText(QRect(x0 + 16, yy, x1 - x0 - 32, 40),
-                        int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignTop),
-                        a["en"])
-            yy += 42
-        pr.setFont(mono)
-        # footer: honesty + controls
-        pr.setPen(QColor(130, 165, 175))
-        pr.drawText(14, h_ - 118,
-                    "faithful local copy of a published mushaf \u2014 quran-uthmani (Hafs) "
-                    "\u00b7 en.sahih (Saheeh International), via alquran.cloud")
-        pr.setPen(QColor(120, 190, 180))
-        pr.drawText(14, h_ - 102,
-                    "a translation opens a door; it is not the Book \u2014 the Arabic "
-                    "is the Qur'an. Seek a teacher, and the tafsir, for understanding.")
-        pr.setPen(QColor(140, 175, 190))
-        pr.drawText(14, h_ - 66,
-                    "WASD fly \u00b7 Space/C up/down \u00b7 [ ] page "
-                    "\u00b7 scroll page \u00b7 E leave (far gate) \u00b7 Home floor")
-        pr.setPen(QColor(180, 200, 220))
-        pr.drawText(14, h_ - 50,
-                    f"page {self.word_page + 1}/{len(self._word_pages)} \u00b7 "
-                    f"surah {s['number']} \u00b7 {s['name']}")
-        # reticle + prompt at the leave gate
+        for (sx, sy, txt, col) in self._word_labels():
+            if not (0 <= sx <= w_ and 0 <= sy <= h_):
+                continue
+            pr.setPen(QColor(int(col[0] * 255), int(col[1] * 255),
+                             int(col[2] * 255), 225))
+            pr.drawText(int(sx) + 6, int(sy), txt)
+
+        # ---- reticle + prompt at whatever you are standing in ----
         n0 = self._nearest()
         ccx, ccy = w_ // 2, h_ // 2
         pr.setPen(QPen(QColor(255, 185, 40, 235) if n0 else QColor(120, 230, 180, 190), 2))
         for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
             pr.drawLine(ccx + dx * 18, ccy + dy * 18, ccx + dx * 18 + dx * 12, ccy + dy * 18)
             pr.drawLine(ccx + dx * 18, ccy + dy * 18, ccx + dx * 18, ccy + dy * 18 + dy * 12)
-        if n0 and n0["kind"] == "leave_word":
-            prompt = "[E] leave the room of the Word \u2014 back to the wire"
-            pr.setPen(QColor(255, 215, 120))
-            tw = fm.horizontalAdvance(prompt)
-            pr.drawText((w_ - tw) // 2, ccy + 46, prompt)
+        pr.setFont(mono)
+        fm = pr.fontMetrics()
+        if n0:
+            kind = n0["kind"]
+            if kind == "word_surah":
+                prompt = f"[E] open {n0['surah']['number']} {n0['surah']['name']}"
+            elif kind == "word_random":
+                prompt = "[E] open a random chapter (its first ayah)"
+            elif kind == "word_next":
+                prompt = ("[E] the chapter ends \u2014 back to the chapters"
+                          if self._word_at_end() else "[E] travel to the next ayah")
+            elif kind == "word_prev":
+                prompt = "[E] back to the previous ayah"
+            elif kind == "word_chapters":
+                prompt = "[E] back to the chapters"
+            elif kind == "word_leave":
+                prompt = "[E] leave the room of the Word \u2014 back to the wire"
+            else:
+                prompt = ""
+            if prompt:
+                pr.setPen(QColor(255, 215, 120))
+                tw = fm.horizontalAdvance(prompt)
+                pr.drawText((w_ - tw) // 2, ccy + 46, prompt)
         if self._hud_msg and now < self._hud_until:
             pr.setPen(QColor(120, 230, 180))
             tw = fm.horizontalAdvance(self._hud_msg)
             pr.drawText((w_ - tw) // 2, h_ - 40, self._hud_msg)
+
+    def _hud_word_ayah(self, pr, now, w_, h_, surah, ay):
+        """The ayah, written on the sky — Arabic, transliteration, a translation."""
+        txt = quranworld.sky_text(surah, ay)
+        x0, x1 = int(w_ * 0.11), int(w_ - w_ * 0.11)
+        # a soft panel so the words stay legible over the world
+        band_h = max(150, int(h_ * 0.40))
+        pr.fillRect(x0, 60, x1 - x0, band_h, QColor(4, 10, 16, 150))
+        pr.setPen(QColor(70, 120, 132))
+        pr.drawRect(x0, 60, x1 - x0, band_h)
+        # reference line
+        pr.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+        pr.setPen(QColor(140, 225, 215))
+        ref = (f"{txt['ref']}   \u00b7   "
+               f"{'MECCAN' if surah.get('meccan') else 'MEDINAN'}   \u00b7   "
+               f"ayah {ay['n']} of {len(surah['ayahs'])}")
+        fm = pr.fontMetrics()
+        pr.drawText((w_ - fm.horizontalAdvance(ref)) // 2, 82, ref)
+        # the Arabic, large, centred — the Qur'an itself
+        ar_h = int(h_ * 0.15)
+        ar_f = QFont("Sans Serif", max(16, ar_h // 2))
+        pr.setFont(ar_f)
+        pr.setPen(QColor(235, 240, 245))
+        pr.drawText(QRect(x0 + 20, 92, x1 - x0 - 40, ar_h),
+                    int(Qt.AlignmentFlag.AlignHCenter) | int(Qt.AlignmentFlag.AlignTop)
+                    | int(Qt.TextFlag.TextWordWrap), txt["arabic"])
+        # transliteration + translation beneath it
+        ty = 92 + ar_h + 8
+        tr_f = QFont("Monospace", max(10, int(h_ * 0.019)))
+        tr_f.setItalic(True)
+        pr.setFont(tr_f)
+        pr.setPen(QColor(160, 185, 195))
+        th = pr.fontMetrics().height() * (1 + len(txt["transliteration"]) // 90)
+        pr.drawText(QRect(x0 + 30, ty, x1 - x0 - 60, th),
+                    int(Qt.AlignmentFlag.AlignHCenter) | int(Qt.AlignmentFlag.AlignTop)
+                    | int(Qt.TextFlag.TextWordWrap), txt["transliteration"])
+        ey = ty + th + 6
+        en_f = QFont("Serif", max(11, int(h_ * 0.021)))
+        pr.setFont(en_f)
+        pr.setPen(QColor(216, 226, 231))
+        pr.drawText(QRect(x0 + 30, ey, x1 - x0 - 60, 90),
+                    int(Qt.AlignmentFlag.AlignHCenter) | int(Qt.AlignmentFlag.AlignTop)
+                    | int(Qt.TextFlag.TextWordWrap), txt["translation"])
+        # the world, described honestly (what image, not what meaning)
+        pr.setFont(QFont("Monospace", 9))
+        pr.setPen(QColor(150, 190, 185))
+        desc = quranworld.describe(self._word_reci)
+        pr.drawText(14, h_ - 118, f"this world is {desc} \u2014 a reverent impression, "
+                                  f"NOT the meaning (which is with Allah)")
+        pr.setPen(QColor(130, 165, 175))
+        pr.drawText(14, h_ - 102,
+                    "faithful local copy of a published mushaf \u2014 quran-uthmani "
+                    "(Hafs) \u00b7 en.sahih (Saheeh International), via alquran.cloud")
+        pr.setPen(QColor(120, 190, 180))
+        pr.drawText(14, h_ - 86,
+                    "a translation opens a door; it is not the Book \u2014 the Arabic is "
+                    "the Qur'an. Seek a teacher, and the tafsir, for understanding.")
+        pr.setPen(QColor(140, 175, 190))
+        pr.drawText(14, h_ - 66,
+                    "WASD fly \u00b7 Space/C up/down \u00b7 [ ] or scroll travel the ayah "
+                    "\u00b7 E at a gate \u00b7 R the chapters \u00b7 Home leave the room")
+
+    def _hud_word_select(self, pr, now, w_, h_):
+        """The hall of chapters: the surahs, and luck, laid out to choose from."""
+        # title
+        pr.setFont(QFont("Monospace", 14, QFont.Weight.Bold))
+        fm = pr.fontMetrics()
+        title = "THE CHAPTERS, HUNG LIKE STARS"
+        pr.setPen(QColor(150, 240, 228))
+        pr.drawText((w_ - fm.horizontalAdvance(title)) // 2, h_ // 2 - 6, title)
+        pr.setFont(QFont("Monospace", 10))
+        fm = pr.fontMetrics()
+        hint = ("fly to a star and press E to open that chapter \u00b7 or press R for a "
+                "random chapter, which opens at its first ayah")
+        pr.setPen(QColor(150, 190, 200))
+        pr.drawText((w_ - fm.horizontalAdvance(hint)) // 2, h_ // 2 + 18, hint)
+        # a small codex of what is here — faithful to quran.py
+        px = 14
+        py = 66
+        pr.fillRect(px, py, 300, 20 + 16 * (len(self._word_suras) + 1),
+                    QColor(6, 14, 20, 180))
+        pr.setPen(QColor(130, 210, 200))
+        pr.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        pr.drawText(px + 10, py + 18, "THE CHAPTERS (a chosen few)")
+        pr.setFont(QFont("Monospace", 9))
+        yy = py + 36
+        for s in self._word_suras:
+            pr.setPen(QColor(180, 200, 220))
+            pr.drawText(px + 10, yy, f"{s['number']:>3}  {s['name']} \u2014 "
+                                     f"{s['translation']}")
+            pr.setPen(QColor(120, 160, 170))
+            pr.drawText(px + 250, yy, f"{len(s['ayahs'])}v")
+            yy += 16
+        pr.setPen(QColor(150, 190, 185))
+        pr.drawText(px + 10, yy, "R  \u2014  a random chapter \u00b7 first ayah")
+        # honesty + controls
+        pr.setPen(QColor(130, 165, 175))
+        pr.drawText(14, h_ - 118,
+                    "faithful local copy of a published mushaf \u2014 quran-uthmani "
+                    "(Hafs) \u00b7 en.sahih (Saheeh International), via alquran.cloud")
+        pr.setPen(QColor(120, 190, 180))
+        pr.drawText(14, h_ - 102,
+                    "a translation opens a door; it is not the Book \u2014 the Arabic is "
+                    "the Qur'an. Seek a teacher, and the tafsir, for understanding.")
+        pr.setPen(QColor(140, 175, 190))
+        pr.drawText(14, h_ - 66,
+                    "WASD fly \u00b7 Space/C up/down \u00b7 fly to a star, E to open "
+                    "\u00b7 R a random chapter \u00b7 Home leave the room")
 
     def _hud(self, pr: QPainter, now, key):
         w_, h_ = self.width(), self.height()
@@ -2157,9 +2578,12 @@ class WireGLWidget(QOpenGLWidget):
 class WireVisionTab(QWidget):
     """The 'Vision' tab: the playable wire + a live codex side panel."""
 
+    fullscreen_changed = pyqtSignal(bool)      # so the host window can hide its chrome
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.world = None
+        self._fs = False
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
 
@@ -2168,11 +2592,18 @@ class WireVisionTab(QWidget):
         self.b_build.setToolTip("Read the local ground truth and rebuild the playable world (no network, no brain)")
         self.cb_real = QCheckBox("show real names")
         self.cb_real.setToolTip("Reveal the technical term for every place (level the field)")
+        self.b_full = QPushButton("\u26f6 full screen")
+        self.b_full.setToolTip("Give Wire Vision the whole screen (F11) \u2014 hides the "
+                               "panels, keeps the world")
         self.where = QLabel("not built yet — click 'Build the wire'")
         bar.addWidget(self.b_build)
         bar.addWidget(self.cb_real)
+        bar.addWidget(self.b_full)
         bar.addWidget(self.where, 1)
-        lay.addLayout(bar)
+        self.bar = bar
+        self.bar_widget = QWidget()
+        self.bar_widget.setLayout(bar)
+        lay.addWidget(self.bar_widget)
 
         split = QSplitter(Qt.Orientation.Horizontal)
         self.deck = _GLDeck()
@@ -2183,6 +2614,7 @@ class WireVisionTab(QWidget):
         split.addWidget(self.deck)
 
         right = QFrame(); rv = QVBoxLayout(right)
+        self.right = right
         rv.addWidget(QLabel("CODEX — the wire, translated"))
         self.codex = QTextBrowser(); self.codex.setOpenExternalLinks(False)
         rv.addWidget(self.codex, 1)
@@ -2244,17 +2676,39 @@ class WireVisionTab(QWidget):
 
         self.b_build.clicked.connect(self.build)
         self.cb_real.stateChanged.connect(self._toggle_real)
+        self.b_full.clicked.connect(lambda: self.toggle_fullscreen())
         self.gl.stratum_changed.connect(self._on_stratum)
         self.gl.request_rebuild.connect(self.build)
         self.gl.market_opened.connect(self._on_market)
         self.gl.market_closed.connect(self._on_market_closed)
         self.gl.agent_selected.connect(self._open_editor)
         self.gl.menu_toggle.connect(self._toggle_menu)
+        self.gl.fullscreen_request.connect(self.toggle_fullscreen)
         self.b_new_agent.clicked.connect(self._show_create)
         self.b_close_menu.clicked.connect(lambda: self._set_menu(False))
+        self._fs_sc = QShortcut(QKeySequence("F11"), self)
+        self._fs_sc.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._fs_sc.activated.connect(self.toggle_fullscreen)
         self._render_codex()
         # first build on the next event-loop turn so the widget is realized
         QTimer.singleShot(300, self.build)
+
+    def toggle_fullscreen(self, want=None):
+        """Give the world the whole screen: hide this tab's bar + codex, ask the
+        host window to hide its own chrome, and go full screen. Reversible."""
+        self._fs = (not self._fs) if want is None else bool(want)
+        self.bar_widget.setVisible(not self._fs)
+        self.right.setVisible(not self._fs)
+        self.b_full.setText("\u2715 exit full screen" if self._fs
+                            else "\u26f6 full screen")
+        win = self.window()
+        if win is not None:
+            if self._fs:
+                win.showFullScreen()
+            else:
+                win.showNormal()
+        self.fullscreen_changed.emit(self._fs)
+        self.gl.setFocus()
 
     def build(self):
         try:
