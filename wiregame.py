@@ -17,7 +17,7 @@ default; the real term is one keypress away ('T'), so nobody is left behind.
 Standalone:  python3 wiregame.py
 """
 from __future__ import annotations
-import math, random, sys, time, hashlib
+import math, os, random, sys, time, hashlib, html, re
 
 from PyQt6.QtCore import Qt, QRect, QTimer, pyqtSignal
 from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QPainter, QPen, QSurfaceFormat,
@@ -34,11 +34,26 @@ from OpenGL.GLU import *
 
 import wirevision
 import wiregate
+import wirenet
 import quran
 import quranworld
 from wiregate import MARKET_FLOOR_Y, MARKET_R, RETURN_GATE_POS
 
 MARKET_GATE_POS = [23.0, 0.06, 0.0]   # the tall portal to BlackHorse — its own cleared plaza, due +x
+
+# the OUTWARD GATE — the one place past the edge that really goes out. A pier
+# runs off the floor, over the open sea, due −z, to a gate that dials the real
+# net (wirenet: real DNS, real HTTP/HTTPS — no browser). Everywhere else the sea
+# is a memory that carries no data; here, and only here, the wire is real.
+NET_ANGLE = -math.pi * 0.5            # due −z, the far side, away from both plazas
+NET_WEDGE_HALF = 0.17                 # radians of pier you can fly either side
+NET_PIER_IN = 39.0                    # where the pier leaves the floor
+NET_PIER_OUT = 55.0                   # how far out over the sea it reaches
+NET_GATE_R = 52.0                     # the gate stands at the seaward end
+NET_GATE_X = NET_GATE_R * math.cos(NET_ANGLE)
+NET_GATE_Z = NET_GATE_R * math.sin(NET_ANGLE)
+NET_PROBE_R = 10.0                    # close enough and the world starts a real probe
+NET_HOST_ENV = "MRFLUFFY_NET_HOST"    # the real address to dial (unset = a neutral default)
 
 # the room of the Word (Learn Islam): a calm hall on the far side, due −x.
 # No image, nothing depicted — the room holds only scripture on light. From the
@@ -55,6 +70,20 @@ WORD_CLUSTER_TOP = WORD_FLOOR_Y + 56.0   # highest a chapter-star hangs
 WORD_NEXT_ANGLE = 0.0        # gate to the next ayah, due +x
 WORD_PREV_ANGLE = math.pi * 0.5   # gate to the previous ayah
 WORD_BACK_ANGLE = math.pi    # gate back to the chapters
+
+# the EXCHANGE — the hall the outward gate opens into: a room of gates. Each gate
+# leads to a real service out on the net, and what a gate answers is real. For now
+# there is one gate, and it is DuckDuckGo. The hall itself is dressing; the search
+# is not. More gates will hang here later.
+EXCHANGE_FLOOR_Y = -132.0
+EXCHANGE_R = 30.0
+EXCHANGE_GATE_R = 17.0        # the ring the service gates hang on
+EXCHANGE_RETURN_POS = [0.0, EXCHANGE_FLOOR_Y + 6.0, EXCHANGE_R - 7.0]
+EXCHANGE_GATES = (
+    {"id": "ddg", "name": "DuckDuckGo", "angle": -math.pi * 0.5,
+     "host": "lite.duckduckgo.com",
+     "blurb": "the web, searched \u2014 real results, served here"},
+)
 
 # index: 0 floor, 1..5 = protocol strata (top -> bottom)
 STRATA_Y = [0.0, -10.0, -20.0, -30.0, -40.0, -50.0]
@@ -166,6 +195,7 @@ class WireGLWidget(QOpenGLWidget):
     fullscreen_request = pyqtSignal()          # F11 — the tab owns full screen
     escape_request = pyqtSignal()              # Esc — leave full screen (the tab decides)
     word_changed = pyqtSignal()                # entered/left the Word room, or moved ayah
+    web_changed = pyqtSignal()                 # entered/left the Exchange, or a gate
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -201,6 +231,24 @@ class WireGLWidget(QOpenGLWidget):
         self._word_stars = None          # lazily-built decorative star field
         self._word_cluster = None        # lazily-built scatter of chapter-stars
         self._word_cluster_n = -1
+        # the outward gate — the one place the wire is REAL (wirenet, no browser)
+        self.net = None                  # lazily-started background dialer
+        self._net_host = os.environ.get(NET_HOST_ENV) or "https://1.1.1.1/cdn-cgi/trace"
+        self._net_job = None
+        self._net_result = None
+        self._net_probe_t = 0.0
+        self._net_status = ""            # what the gate last really answered
+        # the Exchange — the hall of gates the outward gate opens into
+        self.exchange = False
+        self.service = None              # the gate stepped into, or None
+        self.web_query = ""              # what has been typed at the terminal
+        self.web_job = None              # the search/read out on the worker
+        self.web_answer = None           # the last real answer dict
+        self.web_results = []
+        self.web_status = ""
+        self.web_page = None             # {title, url, lines} a served page
+        self.web_scroll = 0
+        self._web_caret = 0.0
         self._last_t = time.time()
         self._hud_msg = ""
         self._hud_until = 0.0
@@ -266,6 +314,15 @@ class WireGLWidget(QOpenGLWidget):
         self.word_ref = None
         self._word_reci = None
         self._word_suras = []
+        self.exchange = False
+        self.service = None
+        self.web_query = ""
+        self.web_job = None
+        self.web_answer = None
+        self.web_results = []
+        self.web_status = ""
+        self.web_page = None
+        self.web_scroll = 0
         self.pos = [0.0, EYE, 10.0]
         self.yaw = 0.0
         self.pitch = -0.05
@@ -570,6 +627,8 @@ class WireGLWidget(QOpenGLWidget):
         # the room of the Word — Learn Islam, on the far side, due −x
         self._word_apron(t, y)
         self._draw_word_gate(t, y)
+        # the OUTWARD GATE — a pier over the open sea; the one place the wire is real
+        self._draw_net_gate(t, y)
 
     def _market_apron(self, t, y):
         """Blackhorse's own arrival pad on the wire floor: a dark violet plaza
@@ -690,6 +749,56 @@ class WireGLWidget(QOpenGLWidget):
         glEnd()
         glLineWidth(1.0)
         self._portal(gx, gz, gy + 1.4, 2.6, (0.72, 0.88, 0.98), t)
+
+    def _draw_net_gate(self, t, y):
+        """The OUTWARD GATE — a pier run off the floor, out over the open sea, to
+        the one gate that really dials the wire. The pier and the portal are
+        dressing; the answer the gate gives is the network's, unedited."""
+        ca, sa = math.cos(NET_ANGLE), math.sin(NET_ANGLE)
+        px, pz = -sa, ca                      # perpendicular, across the pier
+        w0, w1 = 2.2, 1.5
+
+        def corner(r, off):
+            return (r * ca + off * px, y + 0.06, r * sa + off * pz)
+
+        quad = (corner(NET_PIER_IN, -w0), corner(NET_PIER_OUT, -w1),
+                corner(NET_PIER_OUT, w1), corner(NET_PIER_IN, w0))
+        glColor4f(0.08, 0.19, 0.18, 0.95)
+        glBegin(GL_QUADS)
+        for x, yy, z in quad:
+            glVertex3f(x, yy, z)
+        glEnd()
+        glLineWidth(1.0)
+        glColor4f(0.32, 0.82, 0.72, 0.65)
+        glBegin(GL_LINE_LOOP)
+        for x, yy, z in quad:
+            glVertex3f(x, yy, z)
+        glEnd()
+        # pilings, dipping down into the dark sea
+        for r in range(int(NET_PIER_IN), int(NET_PIER_OUT) + 1, 3):
+            for off in (-w0 * 0.7, w0 * 0.7):
+                x = r * ca + off * px
+                z = r * sa + off * pz
+                self._cube(x, y - 1.7, z, 0.34, 3.6, 0.34, (0.11, 0.15, 0.17))
+        # the sign at the pier mouth
+        mx, mz = NET_PIER_IN * ca, NET_PIER_IN * sa
+        self._cube(mx, y + 1.1, mz, 1.1, 2.2, 0.5, (0.13, 0.33, 0.30))
+        # the gate itself
+        gx, gz = NET_GATE_X, NET_GATE_Z
+        for off in (-1.6, 1.6):
+            x = gx + off * px
+            z = gz + off * pz
+            self._cube(x, y + 3.2, z, 0.5, 6.4, 0.5, (0.20, 0.30, 0.30))
+        self._cube(gx, y + 6.7, gz, 3.7, 0.5, 0.6, (0.35, 0.95, 0.80))
+        rr = 2.0 + 0.15 * math.sin(t * 1.3)
+        glColor4f(0.28, 0.95, 0.74, 0.80)
+        glBegin(GL_QUADS)
+        glVertex3f(gx - rr * px, y + 0.5, gz - rr * pz)
+        glVertex3f(gx + rr * px, y + 0.5, gz + rr * pz)
+        glVertex3f(gx + rr * 0.8 * px, y + 6.3, gz + rr * 0.8 * pz)
+        glVertex3f(gx - rr * 0.8 * px, y + 6.3, gz - rr * 0.8 * pz)
+        glEnd()
+        self._portal(gx, gz, y + 3.0, 2.8, (0.40, 1.0, 0.80), t)
 
     # ---- the floor as ROOMS: your segment inside, old segments as ruins -----
     def _ruin_segments(self):
@@ -874,6 +983,9 @@ class WireGLWidget(QOpenGLWidget):
     # ---- input -------------------------------------------------------------
     def keyPressEvent(self, e):
         k = e.key()
+        if self.service is not None:
+            self._web_key(e)
+            return
         if k == Qt.Key.Key_Escape:
             self._drag = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -911,6 +1023,8 @@ class WireGLWidget(QOpenGLWidget):
                 self._leave_market()
             elif self.word:
                 self._leave_word()
+            elif self.exchange:
+                self._leave_exchange()
             elif self.deep is not None:
                 self._exit_deep(surface=True)
             else:
@@ -954,6 +1068,12 @@ class WireGLWidget(QOpenGLWidget):
 
     # ---- movement + interaction -------------------------------------------
     def _step(self, dt):
+        self._net_tick()
+        if self.exchange:
+            if self.service is None:
+                self._exchange_step(dt)
+            self._web_tick()
+            return
         if self.market:
             self._market_step(dt)
             return
@@ -1084,9 +1204,14 @@ class WireGLWidget(QOpenGLWidget):
             self.pos[1] += dy / m * spd
             self.pos[2] += dz / m * spd
         rr = math.hypot(self.pos[0], self.pos[2])
-        if rr > PLATFORM_R - 1.5:
-            self.pos[0] = self.pos[0] / rr * (PLATFORM_R - 1.5)
-            self.pos[2] = self.pos[2] / rr * (PLATFORM_R - 1.5)
+        # the floor ends at PLATFORM_R — except the pier, which runs out over the
+        # open sea to the outward gate. There, and only there, you may go past it.
+        ang = math.atan2(self.pos[2], self.pos[0])
+        on_pier = abs((ang - NET_ANGLE + math.pi) % (2 * math.pi) - math.pi) <= NET_WEDGE_HALF
+        cap = (NET_PIER_OUT - 1.0) if on_pier else (PLATFORM_R - 1.5)
+        if rr > cap:
+            self.pos[0] = self.pos[0] / rr * cap
+            self.pos[2] = self.pos[2] / rr * cap
         # the nearest stratum is the layer you see: glide up and down the stack,
         # and past the edge into the open sea (still just atmosphere, no entity).
         self.active = min(range(len(STRATA_Y)),
@@ -2028,6 +2153,8 @@ class WireGLWidget(QOpenGLWidget):
             return self._nearest_market()
         if self.word:
             return self._nearest_word()
+        if self.exchange:
+            return self._nearest_exchange()
         if not self.world or self.deep is not None:
             return None
         px, pz = self.pos[0], self.pos[2]
@@ -2043,6 +2170,7 @@ class WireGLWidget(QOpenGLWidget):
             consider("heart", 0, -8, 4.5)
             consider("market", MARKET_GATE_POS[0], MARKET_GATE_POS[2], 4.6)
             consider("word", WORD_GATE_POS[0], WORD_GATE_POS[2], 4.6)
+            consider("net", NET_GATE_X, NET_GATE_Z, 6.0)
             for s in self._ruin_segments():
                 dx = WALL_R * math.cos(s["angle"])
                 dz = WALL_R * math.sin(s["angle"])
@@ -2133,6 +2261,12 @@ class WireGLWidget(QOpenGLWidget):
             elif n["kind"] == "word_leave":
                 self._leave_word()
             return
+        if self.exchange:
+            if n["kind"] == "service":
+                self._open_service(n["gate"]["id"])
+            elif n["kind"] == "leave_exchange":
+                self._leave_exchange()
+            return
         if self.flying and n["kind"] in ("gate", "well", "up", "electron", "ruin"):
             self._flash("land first (G) to use the well and the gates")
             return
@@ -2143,6 +2277,8 @@ class WireGLWidget(QOpenGLWidget):
             self._enter_market()
         elif n["kind"] == "word":
             self._enter_word()
+        elif n["kind"] == "net":
+            self._net_go()
         elif n["kind"] == "heart":
             h = self.world["heart"]
             rtt = "?" if h.get("rtt") is None else f"{round(float(h['rtt']), 1)}ms"
@@ -2182,6 +2318,462 @@ class WireGLWidget(QOpenGLWidget):
         self._hud_msg = msg
         self._hud_until = time.time() + secs
 
+    # ---- the outward gate: real DNS + real HTTP(S), off the main thread ----
+    def _net_tick(self):
+        """The gate's heartbeat: once you are near it, ask the real net on the
+        background worker and keep the last real answer to show. Never blocks."""
+        if self._net_job is not None and self.net is not None:
+            got = self.net.poll(self._net_job)
+            if got is not None:
+                self._net_result = got
+                self._net_status = self._net_describe(got)
+                self._net_job = None
+        if self.word or self.market or self.exchange or self.deep is not None or not self.world:
+            return
+        if self.active != 0:
+            return
+        near = math.hypot(self.pos[0] - NET_GATE_X, self.pos[2] - NET_GATE_Z) <= NET_PROBE_R
+        if near and self._net_job is None and time.time() - self._net_probe_t > 6.0:
+            self._net_probe_t = time.time()
+            if self.net is None:
+                self.net = wirenet.Net()
+            self._net_job = self.net.ask("fetch", self._net_host, max_bytes=2048)
+
+    def _net_describe(self, r):
+        """Say what the net really answered — or the real reason it did not."""
+        if not r or r.get("state") == "out":
+            return "reaching out\u2026"
+        if r.get("kind") == "whoami" and r.get("ok"):
+            return (f"you are {r.get('ip')} on the net \u00b7 colo {r.get('colo')} "
+                    f"\u00b7 {r.get('ms'):.0f}ms")
+        if r.get("ok"):
+            return (f"real answer \u00b7 {r.get('status')} in {r.get('ms'):.0f}ms "
+                    f"\u00b7 {r.get('ip')} \u00b7 {r.get('bytes')}b")
+        return f"no answer: {r.get('error')}"
+
+    def _net_go(self):
+        """Step through the outward gate: it opens into the Exchange, the hall of
+        gates, where each gate leads to a real service out on the net."""
+        if self.net is None:
+            self.net = wirenet.Net()
+        relay = os.environ.get("MRFLUFFY_GATE_URL")
+        if relay and self.presence is None:
+            self._join_relay(relay)
+        self._net_probe_t = time.time()
+        self._enter_exchange()
+
+    def _join_relay(self, url):
+        """Point our presence at a real relay out on the net, so the market crowd
+        becomes real other users rather than just this machine's loopback."""
+        try:
+            if self.presence is not None:
+                self.presence.stop()
+            self.presence = wiregate.Presence(base_url=url)
+            self.presence.start()
+            self._ghost_line = self.presence.describe()
+            self._flash(f"joined the net relay at {url}")
+        except Exception as e:
+            self._flash(f"could not join {url}: {e}")
+
+    # ---- the Exchange: the hall of gates out on the net --------------------
+    def _exchange_gate_xz(self, angle, radius=None):
+        r = EXCHANGE_GATE_R if radius is None else radius
+        return r * math.cos(angle), r * math.sin(angle)
+
+    def _enter_exchange(self):
+        """Step through the outward gate into the hall of gates."""
+        self.exchange = True
+        self.market = False
+        self.word = False
+        self.market_world = None
+        self.deep = None
+        self.transition = None
+        self.selected_agent = None
+        self.selected = None
+        self.service = None
+        self.flying = True
+        self.active = 0
+        self.pos = [0.0, EXCHANGE_FLOOR_Y + EYE, 14.0]
+        self.yaw = 0.0
+        self.pitch = -0.02
+        if self.net is None:
+            self.net = wirenet.Net()
+        self._flash("the Exchange \u2014 gates stand on the ring; step into one to go out")
+        self.web_changed.emit()
+
+    def _leave_exchange(self):
+        self.exchange = False
+        self.service = None
+        self.web_page = None
+        self.web_results = []
+        self.web_query = ""
+        self.web_scroll = 0
+        self.web_job = None
+        self.flying = False
+        self.pos = [NET_GATE_X, EYE, NET_GATE_Z - 2.0]
+        self.yaw = NET_ANGLE
+        self.pitch = -0.05
+        self.active = 0
+        self._flash("back on the pier \u2014 the Exchange is still out there")
+        self.web_changed.emit()
+
+    def _exchange_step(self, dt):
+        k = self.keys
+        fast = 2.2 if Qt.Key.Key_Shift in k else 1.0
+        spd = 13.0 * fast * dt
+        cp = math.cos(self.pitch)
+        fx, fy, fz = cp * math.sin(self.yaw), math.sin(self.pitch), -cp * math.cos(self.yaw)
+        rx, rz = math.cos(self.yaw), math.sin(self.yaw)
+        dx = dy = dz = 0.0
+        if Qt.Key.Key_W in k:
+            dx += fx; dy += fy; dz += fz
+        if Qt.Key.Key_S in k:
+            dx -= fx; dy -= fy; dz -= fz
+        if Qt.Key.Key_A in k:
+            dx -= rx; dz -= rz
+        if Qt.Key.Key_D in k:
+            dx += rx; dz += rz
+        if Qt.Key.Key_Space in k:
+            dy += 1.0
+        if Qt.Key.Key_C in k:
+            dy -= 1.0
+        m = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if m > 0:
+            self.pos[0] += dx / m * spd
+            self.pos[1] += dy / m * spd
+            self.pos[2] += dz / m * spd
+        rr = math.hypot(self.pos[0], self.pos[2])
+        if rr > EXCHANGE_R - 1.5:
+            self.pos[0] = self.pos[0] / rr * (EXCHANGE_R - 1.5)
+            self.pos[2] = self.pos[2] / rr * (EXCHANGE_R - 1.5)
+        self.pos[1] = max(EXCHANGE_FLOOR_Y + EYE * 0.4,
+                          min(EXCHANGE_FLOOR_Y + 46.0, self.pos[1]))
+
+    def _exchange_sky(self):
+        glClearColor(0.010, 0.015, 0.030, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        y = EXCHANGE_FLOOR_Y
+        glLineWidth(1.0)
+        glColor4f(0.07, 0.12, 0.18, 1.0)
+        glBegin(GL_LINE_LOOP)
+        for i in range(64):
+            a = 2 * math.pi * i / 64
+            glVertex3f((EXCHANGE_R - 1.0) * math.cos(a), y + 0.02,
+                       (EXCHANGE_R - 1.0) * math.sin(a))
+        glEnd()
+
+    def _draw_exchange(self, t):
+        y = EXCHANGE_FLOOR_Y
+        glColor4f(0.008, 0.014, 0.026, 1.0)
+        glBegin(GL_TRIANGLE_FAN)
+        glVertex3f(0, y, 0)
+        for i in range(49):
+            a = 2 * math.pi * i / 48
+            glVertex3f(EXCHANGE_R * math.cos(a), y, EXCHANGE_R * math.sin(a))
+        glEnd()
+        for r in (9, 17, 25):
+            glColor4f(0.05, 0.10, 0.16, 1.0)
+            glBegin(GL_LINE_LOOP)
+            for i in range(48):
+                a = 2 * math.pi * i / 48
+                glVertex3f(r * math.cos(a), y + 0.03, r * math.sin(a))
+            glEnd()
+        # a slow field of pale data-motes drifting in the hall (dressing)
+        glPointSize(2.0)
+        glBegin(GL_POINTS)
+        for i in range(150):
+            a = (i * 2.39996) % (2 * math.pi)
+            rr = EXCHANGE_R * (0.18 + 0.78 * ((i * 0.618) % 1.0))
+            hh = 2.0 + 34.0 * ((i * 0.271) % 1.0)
+            tw = 0.5 + 0.5 * math.sin(t * 1.1 + i)
+            glColor4f(0.10 + 0.35 * tw, 0.42 + 0.40 * tw, 0.70 + 0.30 * tw, 0.7)
+            glVertex3f(rr * math.cos(a), y + hh, rr * math.sin(a))
+        glEnd()
+        glPointSize(1.0)
+        # the beacon you arrive by
+        self._prism(0, 0, 1.2, 0.4, y, y + 18.0, 6, (0.05, 0.18, 0.30))
+        # the service gates on the ring
+        for g in EXCHANGE_GATES:
+            self._draw_exchange_gate(g, t)
+        # the return gate back to the pier, due +z
+        rx, _, rz = EXCHANGE_RETURN_POS
+        rr = 2.1 + 0.12 * math.sin(t * 0.9)
+        self._cube(rx, y + 3.0, rz, 0.9, 6.2, 0.9, (0.30, 0.22, 0.10))
+        glColor4f(0.95, 0.72, 0.25, 0.85)
+        glBegin(GL_QUADS)
+        glVertex3f(rx - rr, y + 0.5, rz)
+        glVertex3f(rx + rr, y + 0.5, rz)
+        glVertex3f(rx + rr * 0.7, y + 7.6, rz)
+        glVertex3f(rx - rr * 0.7, y + 7.6, rz)
+        glEnd()
+        self._portal(rx, rz, y + 1.4, 2.6, (0.95, 0.72, 0.25), t)
+
+    def _draw_exchange_gate(self, g, t):
+        x, z = self._exchange_gate_xz(g["angle"])
+        y = EXCHANGE_FLOOR_Y
+        near = math.hypot(self.pos[0] - x, self.pos[2] - z) <= 9.0
+        col = (0.30, 0.80, 0.98) if near else (0.20, 0.52, 0.70)
+        self._cube(x, y + 1.2, z, 1.3, 2.4, 1.3, (col[0] * 0.3, col[1] * 0.3, col[2] * 0.3))
+        r = 2.2 + 0.14 * math.sin(t * 1.4)
+        # a tall lens of light: a doorway, not a figure
+        glColor4f(col[0], col[1], col[2], 0.42)
+        glBegin(GL_QUADS)
+        glVertex3f(x - r, y - 2.6, z)
+        glVertex3f(x + r, y - 2.6, z)
+        glVertex3f(x + r * 0.72, y + 4.6, z)
+        glVertex3f(x - r * 0.72, y + 4.6, z)
+        glEnd()
+        glLineWidth(2.0)
+        glColor4f(min(1.0, col[0] * 1.5), min(1.0, col[1] * 1.4), col[2], 0.95)
+        glBegin(GL_LINE_LOOP)
+        for i in range(40):
+            a = 2 * math.pi * i / 40
+            glVertex3f(x + r * math.cos(a), y + 1.0 + r * 0.9 * math.sin(a), z)
+        glEnd()
+        glLineWidth(1.0)
+        for k in range(6):
+            a = k * 2 * math.pi / 6 + 0.3 * t
+            self._octa(x + 3.0 * math.cos(a), y - 1.6 + 0.3 * math.sin(t + k),
+                       z + 3.0 * math.sin(a), 0.14, col, squash=1.4)
+        self._portal(x, z, y - 3.0, 2.4, col, t)
+
+    def _nearest_exchange(self):
+        px, pz = self.pos[0], self.pos[2]
+        best = None
+
+        def consider(kind, x, z, radius, **kw):
+            nonlocal best
+            d = math.hypot(px - x, pz - z)
+            if d <= radius and (best is None or d < best["d"]):
+                best = {"kind": kind, "d": d, **kw}
+
+        for g in EXCHANGE_GATES:
+            x, z = self._exchange_gate_xz(g["angle"])
+            consider("service", x, z, 6.0, gate=g)
+        consider("leave_exchange", EXCHANGE_RETURN_POS[0], EXCHANGE_RETURN_POS[2], 5.5)
+        return best
+
+    # ---- the gates themselves: real services (for now, DuckDuckGo) ----------
+    def _open_service(self, gid):
+        g = next((x for x in EXCHANGE_GATES if x["id"] == gid), None)
+        if g is None:
+            return
+        self.service = gid
+        self.web_query = ""
+        self.web_results = []
+        self.web_answer = None
+        self.web_page = None
+        self.web_scroll = 0
+        self.web_job = None
+        self.web_status = f"{g['name']} \u2014 type a search and press Enter"
+        if self.net is None:
+            self.net = wirenet.Net()
+        self._flash(f"you step into {g['name']} \u2014 the gate is live")
+        self.web_changed.emit()
+
+    def _close_service(self):
+        self.service = None
+        self.web_page = None
+        self.web_results = []
+        self.web_query = ""
+        self.web_scroll = 0
+        self.web_changed.emit()
+
+    def _web_key(self, e):
+        """Keys while a gate is open. Returns True when the key is ours."""
+        k = e.key()
+        if k == Qt.Key.Key_Escape:
+            if self.web_page is not None:
+                self.web_page = None
+                self.web_scroll = 0
+            else:
+                self._close_service()
+            return True
+        if k == Qt.Key.Key_Home:
+            self._leave_exchange()
+            return True
+        if self.web_page is not None:                       # reading a real page
+            if k in (Qt.Key.Key_BracketLeft, Qt.Key.Key_PageUp, Qt.Key.Key_Up):
+                self.web_scroll = max(0, self.web_scroll - 70)
+            elif k in (Qt.Key.Key_BracketRight, Qt.Key.Key_PageDown, Qt.Key.Key_Down):
+                self.web_scroll += 70
+            elif k == Qt.Key.Key_End:
+                self.web_scroll += 100000
+            return True
+        if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):      # the search terminal
+            self._web_search()
+        elif k == Qt.Key.Key_Backspace:
+            self.web_query = self.web_query[:-1]
+        elif Qt.Key.Key_1 <= k <= Qt.Key.Key_9:
+            self._web_open_result(k - Qt.Key.Key_1)
+        elif k == Qt.Key.Key_0:
+            self._web_open_result(9)
+        else:
+            ch = e.text()
+            if ch and ch.isprintable() and len(self.web_query) < 140:
+                self.web_query += ch
+        return True
+
+    def _web_search(self):
+        q = self.web_query.strip()
+        if not q:
+            self.web_status = "nothing typed yet \u2014 write a search first"
+            return
+        if self.net is None:
+            self.net = wirenet.Net()
+        self.web_results = []
+        self.web_page = None
+        self.web_status = f"asking DuckDuckGo for \u201c{q}\u201d\u2026"
+        self.web_job = self.net.ask("search", q)
+
+    def _web_open_result(self, i):
+        if i < 0 or i >= len(self.web_results):
+            return
+        hit = self.web_results[i]
+        if self.net is None:
+            self.net = wirenet.Net()
+        self.web_page = {"title": hit["title"], "url": hit["url"], "lines": None,
+                         "status": "fetching\u2026"}
+        self.web_scroll = 0
+        self.web_job = self.net.ask("fetch", hit["url"], max_bytes=400000, timeout=10)
+
+    def _web_tick(self):
+        """Collect the real answer the worker brought back — search or page."""
+        if self.web_job is None or self.net is None:
+            return
+        got = self.net.poll(self.web_job)
+        if got is None:
+            return
+        self.web_job = None
+        if got.get("kind") == "search":
+            self.web_answer = got
+            if got.get("ok"):
+                res = got.get("results", [])
+                self.web_results = res
+                n = len(res)
+                self.web_status = (
+                    f"duckduckgo \u00b7 {n} result{'' if n == 1 else 's'} \u00b7 "
+                    f"{got.get('ms', 0):.0f}ms \u00b7 {got.get('ip')}"
+                    if n else "duckduckgo answered, but came back with no results")
+            else:
+                self.web_results = []
+                self.web_status = f"no answer: {got.get('error')}"
+        elif got.get("kind") == "fetch" and self.web_page is not None:
+            if got.get("ok"):
+                text = self._web_extract(got.get("text", ""))
+                self.web_page["lines"] = text or "(this page served no readable text \u2014 it may be script-only)"
+                self.web_page["status"] = (f"{got.get('status')} \u00b7 "
+                                           f"{got.get('ms', 0):.0f}ms \u00b7 "
+                                           f"{got.get('bytes')}b \u00b7 {got.get('ip')}")
+            else:
+                self.web_page["lines"] = f"(could not read it: {got.get('error')})"
+                self.web_page["status"] = "no answer"
+
+    def _web_extract(self, raw, limit=40000):
+        """The readable text of a real page: scripts and markup stripped, nothing
+        invented. If a page carries no text we say so rather than dress it up."""
+        t = re.sub(r"(?is)<!--.*?-->", " ", raw or "")
+        t = re.sub(r"(?is)<(script|style|noscript|svg|head|template)[^>]*>.*?</\1>", " ", t)
+        t = re.sub(r"(?is)<br\s*/?>", "\n", t)
+        t = re.sub(r"(?is)</(p|div|li|h[1-6]|tr|section|article|header|footer)>", "\n", t)
+        t = re.sub(r"(?is)<[^>]+>", " ", t)
+        t = html.unescape(t)
+        for _ in range(3):                       # any style block left unclosed
+            t = re.sub(r"\{[^{}]*\}", " ", t)
+        t = re.sub(r"[ \t\r\f\v\u00a0]+", " ", t)
+        t = re.sub(r"\n[ \t]*", "\n", t)
+        t = re.sub(r"\n{3,}", "\n\n", t)
+        return t.strip()[:limit]
+
+    def _hud_exchange(self, pr: QPainter, now):
+        w_, h_ = self.width(), self.height()
+        pr.setFont(QFont("Monospace", 9))
+        pr.setPen(QColor(120, 235, 220))
+        pr.drawText(14, 22, "SECTION 9  //  WIRE VISION  \u2014  THE EXCHANGE")
+        pr.setPen(QColor(90, 150, 160))
+        pr.drawText(14, 36, "the hall past the outward gate  \u00b7  each gate leads to a real service")
+        if self.service is not None:
+            self._hud_ddg(pr, now)
+            return
+        n = self._nearest_exchange()
+        pr.setPen(QColor(180, 200, 220))
+        pr.drawText(14, 52, "you are in the Exchange   [on the net, for real]")
+        if n and n["kind"] == "service":
+            g = n["gate"]
+            pr.setPen(QColor(150, 235, 255))
+            pr.drawText(14, h_ - 96, f"[E] step into {g['name']} \u2014 {g['blurb']}")
+        elif n and n["kind"] == "leave_exchange":
+            pr.setPen(QColor(255, 235, 150))
+            pr.drawText(14, h_ - 96, "[E] back to the wire")
+        pr.setPen(QColor(150, 190, 180))
+        pr.drawText(14, h_ - 118, "one gate hangs here for now \u2014 more will follow")
+        pr.setPen(QColor(120, 235, 220))
+        pr.drawText(14, h_ - 66, "WASD fly  \u00b7  Space/C up/down  \u00b7  E step in  \u00b7  Home leave the Exchange")
+        if self._hud_msg and now < self._hud_until:
+            pr.setPen(QColor(140, 245, 210))
+            pr.drawText(14, h_ - 44, self._hud_msg[:118])
+
+    def _hud_ddg(self, pr: QPainter, now):
+        w_, h_ = self.width(), self.height()
+        pr.fillRect(0, 0, w_, h_, QColor(0, 0, 0, 176))
+        pr.setFont(QFont("Monospace", 9))
+        pr.setPen(QColor(150, 235, 255))
+        pr.drawText(14, 22, "THE EXCHANGE  //  DUCKDUCKGO  \u2014  a real search, served in the wire")
+        m, top = 56, 44
+        bot = h_ - 72
+        pr.fillRect(m, top, w_ - 2 * m, bot - top, QColor(4, 10, 16, 214))
+        pr.setPen(QColor(40, 70, 80))
+        pr.drawRect(m, top, w_ - 2 * m, bot - top)
+        if self.web_page is not None:
+            self._hud_ddg_reader(pr, m, top, w_ - 2 * m, bot - top, now)
+            return
+        # the query line, with a blinking caret
+        caret = "\u2588" if int(now * 2) % 2 == 0 else " "
+        pr.setFont(QFont("Monospace", 12))
+        pr.setPen(QColor(205, 240, 255))
+        pr.drawText(m + 16, top + 38, "\u25b8 " + self.web_query + caret)
+        pr.setFont(QFont("Monospace", 9))
+        pr.setPen(QColor(140, 200, 210))
+        pr.drawText(m + 16, top + 58, self.web_status[:130])
+        # the results, as they came
+        y0 = top + 86
+        pr.setFont(QFont("Monospace", 9))
+        for i, hit in enumerate(self.web_results[:10]):
+            yy = y0 + i * 40
+            if yy > bot - 24:
+                break
+            pr.setPen(QColor(255, 200, 90))
+            pr.drawText(m + 16, yy, "0" if i == 9 else str(i + 1))
+            pr.setPen(QColor(140, 235, 255))
+            pr.drawText(m + 40, yy, hit["title"][:96])
+            pr.setPen(QColor(120, 170, 185))
+            pr.drawText(m + 40, yy + 14, hit["url"][:104])
+            if hit.get("snippet"):
+                pr.setPen(QColor(168, 198, 205))
+                pr.drawText(m + 40, yy + 27, hit["snippet"][:124])
+        pr.setPen(QColor(120, 235, 220))
+        pr.drawText(14, h_ - 66, "type a search  \u00b7  Enter to ask  \u00b7  1-9 / 0 open a result  \u00b7  Esc step back")
+
+    def _hud_ddg_reader(self, pr: QPainter, m, top, ww, hh, now):
+        pr.setFont(QFont("Monospace", 10))
+        pr.setPen(QColor(150, 240, 255))
+        pr.drawText(m + 16, top + 26, self.web_page["title"][:112])
+        pr.setFont(QFont("Monospace", 9))
+        pr.setPen(QColor(120, 170, 185))
+        pr.drawText(m + 16, top + 42, self.web_page["url"][:124])
+        pr.setPen(QColor(150, 200, 200))
+        pr.drawText(m + 16, top + 58, "served \u00b7 " + (self.web_page.get("status") or ""))
+        body = self.web_page.get("lines")
+        rect = QRect(m + 16, top + 72, ww - 32, hh - 72 - 26)
+        pr.setClipRect(rect)
+        pr.setPen(QColor(205, 225, 225))
+        tr = QRect(rect.x(), rect.y() - self.web_scroll, rect.width(), 100000)
+        pr.drawText(tr, int(Qt.TextFlag.TextWordWrap), body or "(reading\u2026)")
+        pr.setClipping(False)
+        pr.setPen(QColor(120, 235, 220))
+        pr.drawText(m + 16, top + hh - 10,
+                    "[ ] scroll  \u00b7  Esc back to results  \u00b7  Home leave the Exchange")
+
     # ---- paint -------------------------------------------------------------
     def paintGL(self):
         now = time.time()
@@ -2195,6 +2787,8 @@ class WireGLWidget(QOpenGLWidget):
             self._market_sky()
         elif self.word:
             self._word_sky()
+        elif self.exchange:
+            self._exchange_sky()
         else:
             self._sky_and_hills(p)
 
@@ -2216,12 +2810,14 @@ class WireGLWidget(QOpenGLWidget):
             self._glyph_rain(now, spin=sp, dim=1.0)
             self._glyph_rain(now, spin=sp + 1.1, dim=0.62)
             self._deep_motes(now)
-        elif not self.word:
+        elif not self.word and not self.exchange:
             self._glyph_rain(now)
         if self.market:
             self._draw_market(now)
         elif self.word:
             self._draw_word(now)
+        elif self.exchange:
+            self._draw_exchange(now)
         elif self.world and self.deep is None:
             self._ground(p)
             self._well(now)
@@ -2560,6 +3156,11 @@ class WireGLWidget(QOpenGLWidget):
             self._hud_word(pr, now)
             return
 
+        # ---- the Exchange: the hall of gates out on the net ----
+        if self.exchange:
+            self._hud_exchange(pr, now)
+            return
+
         # ---- the open sea below the edge: unbounded, honest, carrying no data ----
         if self.deep is not None:
             pr.setPen(QColor(120, 245, 200))
@@ -2681,10 +3282,24 @@ class WireGLWidget(QOpenGLWidget):
                 prompt = f"[E] ride up to {codex.get(STRATA_KEY[n['to']], {}).get('friendly','')}"
             elif n["kind"] == "electron":
                 prompt = "[E] touch the last electron"
+            elif n["kind"] == "net":
+                prompt = "[E] go out to the net \u2014 really dial it"
         if prompt:
             pr.setPen(QColor(255, 235, 150))
             tw = pr.fontMetrics().horizontalAdvance(prompt)
             pr.drawText((w_ - tw) // 2, h_ - 96, prompt)
+        # the outward gate's real answer, shown while you stand near it
+        if (self.active == 0 and self.world and not self.market and not self.word
+                and self.deep is None
+                and math.hypot(self.pos[0] - NET_GATE_X, self.pos[2] - NET_GATE_Z) <= NET_PROBE_R):
+            fmx = pr.fontMetrics()
+            pr.setPen(QColor(150, 255, 210))
+            line = self._net_status or "reaching out to the real net\u2026"
+            tw = fmx.horizontalAdvance(line)
+            pr.drawText((w_ - tw) // 2, h_ - 122, line)
+            pr.setPen(QColor(150, 205, 225))
+            tw = fmx.horizontalAdvance(self._net_host)
+            pr.drawText((w_ - tw) // 2, h_ - 106, self._net_host)
         # transient flash
         if self._hud_msg and now < self._hud_until:
             pr.setPen(QColor(120, 230, 180))
@@ -2865,6 +3480,7 @@ class WireVisionTab(QWidget):
         self.gl.fullscreen_request.connect(self.toggle_fullscreen)
         self.gl.escape_request.connect(self._escape_fullscreen)
         self.gl.word_changed.connect(self._refresh_word_ui)
+        self.gl.web_changed.connect(self._refresh_word_ui)
         self.bw_prev.clicked.connect(lambda: self._word_btn(self.gl.word_prev))
         self.bw_next.clicked.connect(lambda: self._word_btn(self.gl.word_next))
         self.bw_chapters.clicked.connect(lambda: self._word_btn(self.gl.word_back_to_chapters))

@@ -301,26 +301,82 @@ travel through or exit back to the chapters."*
   `[`/`]` keys and the gates all present, scrolling only got in the way; it is now
   left to the page. The HUD control line was updated to match.
 
+### 13. The outward gate — the one place the wire is real (2026-10-11)
+
+- **The wall, and the one door in it.** Everything the world shows is a memory.
+  The one exception is a new **outward gate**: a pier runs off the floor's far
+  edge (due −z) out over the open sea to a portal that **really dials the net**.
+  `wiregame._draw_net_gate` draws the pier + gate; the fly clamp is lifted along a
+  narrow wedge (`NET_WEDGE_HALF`) so you can walk out to radius ~54 (the floor edge
+  is 46) — genuinely outside the boundary. A cleared wedge (`NET_APRON_*` in
+  `wirevision.py`) keeps the LAN cluster off the pier.
+- **`wirenet.py` (new).** Real networking with the standard library only — no
+  browser: `resolve()` (real DNS), `fetch()` (real HTTP/HTTPS, cert-checked,
+  capped, timed out), `whoami()` (asks Cloudflare's trace for our real public IP).
+  Guards: http/https only, private/loopback refused unless
+  `MRFLUFFY_NET_ALLOW_PRIVATE=1`. **Everything runs on ONE daemon worker thread**
+  (`wirenet.Net`) so the render loop never blocks — important on a slow machine.
+  Verified live: DNS + `https://example.com` 200 and the trace endpoint returning
+  our real address (`206.75.186.210`, colo YYC).
+- **In the world.** Approaching within `NET_PROBE_R` starts a real probe on the
+  worker and shows the real answer (status, ms, IP, bytes) in the HUD; `E` at the
+  gate steps into the Exchange (section 14). Target host is `MRFLUFFY_NET_HOST` (a
+  neutral reachability endpoint by default). Nothing is ever dialed that the user
+  did not name.
+- Verified headless: nearest-detection finds the gate (`net`), a real probe returns
+  `200 in ~300ms`, the pier lets you out to radius 54 while off-pier stays capped at
+  44.5, and market / word / deep all still render.
+
+### 14. The Exchange — a hall of gates, and DuckDuckGo behind one (2026-10-11)
+
+- **The hall.** `E` at the outward gate now opens into **the Exchange**
+  (`EXCHANGE_*` consts, `_enter_exchange`/`_leave_exchange`/`_exchange_step`/
+  `_draw_exchange`): a round hall past the edge with a beacon, a slow field of pale
+  data-motes, a return gate back to the pier (due +z), and a ring of **service
+  gates** (`EXCHANGE_GATES`) — each a theta of light that leads to a real service on
+  the net. The ring holds **one gate for now**, and it is **DuckDuckGo**.
+- **DuckDuckGo, for real.** Stepping into the gate opens a terminal in-world: type a
+  query, press Enter, and `wirenet.duckduckgo()` really POSTs to
+  `https://lite.duckduckgo.com/lite/` (no JS, no browser) and returns the real
+  titles/URLs/snippets. One retry covers DDG's intermittent empty challenge page.
+  Pressing a number reads that result's page — `wirenet.fetch()` grabs the real HTML
+  and `_web_extract()` reduces it to readable text (scripts/styles/markup stripped)
+  — served on the same in-world surface. Everything is drawn by QPainter over the GL
+  scene (`_hud_exchange`, `_hud_ddg`, `_hud_ddg_reader`), never a browser window.
+- `wirenet.fetch()` gained form-POST support (`data=`) and gzip/deflate decoding; the
+  `Net` worker gained a `search` job; `wirenet.py --search` and the selftest exercise
+  it. `AGENTS.md` §the wall documents the gate→Exchange→DuckDuckGo path.
+- Verified headless (xvfb/llvmpipe): enter hall → nearest finds the `service` gate →
+  open it → search returns 10 real results (~0.8–0.9 s) → open a result → reader
+  shows ~40 KB of real text; hall / terminal / reader all render without exceptions,
+  and market / word / deep still render.
+
 ## Current state (end of 2026-10-11)
 
 - `wiregame.py` modified for the ayah engine (word room), again for full screen +
   the star-cluster chapter sky, again for the whole-Qur'an cluster, the
   full-screen exit overlay, and the quick-travel bar, again for the
-  reading/scroll fixes, and again to scatter the chapters wide; `app.py`
-  modified for full-screen chrome hiding; `quranworld.py` new; `quran.py`
-  rewritten to open the data; `quran_data.json` (all 114 surahs) and
-  `fetch_quran.py` new. `AGENTS.md` + `SNAPSHOT.md` updated with these sections.
-- Committed `7bce637` (reading/scroll fixes, section 12) on top of `9fe2ac7`
-  (whole Qur'an + full-screen exit + quick travel); snapshot `~/fakegit/mrfluffyv1.9`
-  = `7bce637`. The scatter-the-chapters-wide change (section 12, first bullet) is
-  uncommitted on top.
-- Open threads: (a) make the amber reticle lock/label the nearest real object in
-  3D; (b) polish the market further (crowd density, a sounding bell at the centre
-  column, the gate glow — all dressing on top of the real snapshot); (c) optionally
-  switch the relay to real TLS later (the ghost weave is stdlib-protected, honest
-  about being a weave, not a vow); (d) let surah themes/motifs be tuned. House
-  rules stand: ground truth only, no invented data, flavour not story; the market's
-  platforms/balance/crowd are real, the floor and colours are dressing; the Quran
-  room's text is a faithful local copy of the whole mushaf, nothing in it is ever
-  depicted, and each generated world is an honest impression of the verse's named
-  images — never a claim about its meaning.
+  reading/scroll fixes, again to scatter the chapters wide, again for the
+  outward gate, and again for the Exchange + its DuckDuckGo gate; `app.py`
+  modified for full-screen chrome hiding; `quranworld.py`
+  new; `quran.py` rewritten to open the data; `quran_data.json` (all 114 surahs)
+  and `fetch_quran.py` new; **`wirenet.py` new** (the real dialer, now with
+  form-POST + a DuckDuckGo search job).
+  `AGENTS.md` + `SNAPSHOT.md` updated with these sections.
+- Committed `7029213` (scatter the chapters wide), snapshot `~/fakegit/mrfluffyv1.10`
+  = `7029213`. The outward-gate + `wirenet.py` work (section 13) and the Exchange +
+  DuckDuckGo work (section 14) are uncommitted on top.
+- Open threads: (a) more gates on the Exchange ring (the hall is built for a
+  crowd of services — a search is the first); (b) make the amber reticle
+  lock/label the nearest real object in 3D; (c) polish the market further (crowd
+  density, a sounding bell at the centre column, the gate glow — dressing on top of
+  the real snapshot); (d) optionally switch the relay to real TLS later (the ghost
+  weave is stdlib-protected, honest about being a weave, not a vow); (e) let surah
+  themes/motifs be tuned. House rules stand: ground truth only, no invented data,
+  flavour not story; the market's platforms/balance/crowd are real, the floor and
+  colours are dressing; the Quran room's text is a faithful local copy of the whole
+  mushaf, nothing in it is ever depicted, and each generated world is an honest
+  impression of the verse's named images — never a claim about its meaning; and the
+  outward gate is the first step out for real — it opens into the Exchange, whose
+  gates (DuckDuckGo, so far) really serve the web, and nothing is ever dialed that
+  the user did not name.

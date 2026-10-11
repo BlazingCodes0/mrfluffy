@@ -47,8 +47,11 @@ MARKET_APRON_CENTER = 0.0      # due +x — Blackhorse, the market gate
 MARKET_APRON_HALF = 0.55       # ~32° either side stays clear for the plaza
 WORD_APRON_CENTER = math.pi    # due −x — Learn Islam, the room of the Word
 WORD_APRON_HALF = 0.50         # ~28.6° either side stays clear for the hall
+NET_APRON_CENTER = -math.pi * 0.5   # due −z — the pier out to the outward gate
+NET_APRON_HALF = 0.30          # keep the LAN cluster off the pier
 PLAZA_WEDGES = ((MARKET_APRON_CENTER, MARKET_APRON_HALF),
-                (WORD_APRON_CENTER, WORD_APRON_HALF))
+                (WORD_APRON_CENTER, WORD_APRON_HALF),
+                (NET_APRON_CENTER, NET_APRON_HALF))
 
 
 def _device_angles(n):
@@ -640,10 +643,12 @@ def build() -> dict:
     newest = min(ages) if ages else None
     memory = {
         "newest_s": newest, "newest": _ago(newest),
-        "note": "This world is a MEMORY. The net is vast and infinite — but Wire "
-                "Vision never touches it; it replays the last thing dye and the "
-                "crows observed. Past the last electron the sea never bottoms out, "
-                "but it holds no named entity and carries no data.",
+        "note": "This world is a MEMORY. The net is vast and infinite — Wire "
+                "Vision replays the last thing dye and the crows observed and "
+                "touches nothing. One exception: the outward gate past the edge "
+                "(due \u2212z) really dials the net (real DNS + HTTP/HTTPS, no "
+                "browser). Everywhere else the sea never bottoms out, holds no "
+                "named entity, and carries no data.",
         "counts_note": "SNI counts are cumulative observations (seen N times), not a rate.",
     }
     return {
