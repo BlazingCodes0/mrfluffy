@@ -6,8 +6,10 @@
   fix the **agent-settings `?`**, then turn the wire into a **game**: **drop the
   news channel** entirely, **boot straight into Wire Vision full screen**, add an
   **in-game menu**, and make **flight fun** (speed, Shift boost, motion/speed
-  lines, smooth captured mouse-look). Finally, fix the **menu composite/size
-  glitch** (it only appeared after a window resize).
+  lines, smooth captured mouse-look), and fix the **menu composite/size glitch**
+  (it only appeared after a window resize). Then save the version snapshot
+  (SNAPSHOT entry + this file + a `~/fakegit` copy), **repair the repo's corrupt
+  `git`**, and commit everything.
 
 ## Important Details
 - Hard house rules (unchanged): ground truth only, never invent a number/packet/
@@ -21,7 +23,8 @@
   was **repaired this session** (see the Git repair section in `SNAPSHOT.md`): the
   branch was repointed to the newest intact commit (`64fa7083`), the empty objects
   and stale index removed, the reflog nulls stripped, and the real history is back
-  with a fresh commit (`8ad1672`) on top. A backup of the broken `.git` sits at
+  with two fresh commits on top (`8ad1672` the v1.15 work, `c836838` the repair
+  note). A backup of the broken `.git` sits at
   `/home/a/mrfluffy-git-broken-20261012-000523.tgz`.
 - Versions are also kept as **clean copies in `~/fakegit`** — newest now
   **`~/fakegit/mrfluffyv1.15`** (v1.14.2 was the prior one; v1.14 / v1.13 / …).
@@ -100,6 +103,20 @@
   next event-loop tick** (`QTimer.singleShot(0, …)`) once children are polished.
   Verified: menu pages now size correctly at once (291 → 343 → 496 → 291) with no
   resize nudge.
+- **Version snapshot + git repair.** Saved this conversation's ritual: the
+  `SNAPSHOT.md` "Current state (v1.15)" entry, this file, and a clean
+  `~/fakegit/mrfluffyv1.15` copy (`rsync -a --exclude=.git`, verified identical).
+  Then repaired the corrupt repo **without losing history**:
+  - backed up the broken `.git` → `/home/a/mrfluffy-git-broken-20261012-000523.tgz`;
+  - the corruption was three 0-byte loose objects (`6734eae9` commit at `HEAD`,
+    `22e76234` tree, `4021e81622` blob) plus stray nulls in `.git/logs/*`. The
+    reflog held the real history up to `64fa7083`; **none** of the missing shas
+    were reachable from it, so nothing real was lost;
+  - repointed `master` → `64fa7083`, removed the three empty objects + the stale
+    index, and stripped the nulls from the reflogs (`tr -d '\000'`);
+  - `git fsck --full` → clean; `git log`/`git reflog` read the full history again;
+  - committed the working tree: `8ad1672` (v1.15) then `c836838` (the repair note).
+  Scripted entry: `git update-ref`/direct ref write + `git add -A` + `git commit`.
 - Verified offscreen: `py_compile` clean for `wiregame.py`, `wiregate.py`,
   `wiresettings.py`, `app.py`, `daemon.py`, `wireout.py`; the `vtest`/`vtest2`/
   `vtest3` smoke suites still pass; menu/look/speed scratch tests pass; app+daemon
@@ -134,3 +151,7 @@
 - `/home/a/mrfluffy/config/wire_settings.json`: the persisted game knobs + live mode.
 - `/home/a/mrfluffy/SNAPSHOT.md`, `/home/a/mrfluffy/AGENTS.md`: state docs (AGENTS.md news section now stale).
 - `~/fakegit/mrfluffyv1.15` = this conversation's clean snapshot (excludes `.git`).
+- `/home/a/mrfluffy-git-broken-20261012-000523.tgz` = backup of the pre-repair
+  corrupt `.git` (keep until the repaired repo is trusted).
+- `/home/a/mrfluffy/.git` = repaired repo; `master` = `c836838` (history intact
+  back to the initial commit `5a1c862`).
