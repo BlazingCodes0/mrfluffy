@@ -16,9 +16,14 @@
   drops packets *from* a source at THIS NIC; the Qur'an is never depicted.
 - Widget is **PyQt6**. Offscreen smoke tests run the Python path but GL does not
   render (`QOpenGLWidget: No fbo`); that is expected.
-- **Real `git` is corrupt** (`.git/objects` has empty files; `HEAD` =
-  `6734eae9…` is an empty object; `git status/log/fsck` all fail). **Do NOT
-  repair it.** Versions are kept as **clean copies in `~/fakegit`** — newest now
+- **Real `git` was corrupt** (`.git/objects` had three 0-byte files; `HEAD` =
+  `6734eae9…` pointed at an empty object; `git status/log/fsck` all failed) — and
+  was **repaired this session** (see the Git repair section in `SNAPSHOT.md`): the
+  branch was repointed to the newest intact commit (`64fa7083`), the empty objects
+  and stale index removed, the reflog nulls stripped, and the real history is back
+  with a fresh commit (`8ad1672`) on top. A backup of the broken `.git` sits at
+  `/home/a/mrfluffy-git-broken-20261012-000523.tgz`.
+- Versions are also kept as **clean copies in `~/fakegit`** — newest now
   **`~/fakegit/mrfluffyv1.15`** (v1.14.2 was the prior one; v1.14 / v1.13 / …).
 - Versioning ritual (this is "commit" for this repo): **SNAPSHOT.md entry +
   `snapshots/CONVERSATION_<date>.md` + a clean `~/fakegit/mrfluffyvX.Y` copy
@@ -101,7 +106,8 @@
   import with `news`/`readout` absent.
 
 ### Blocked
-- None code-wise. Real `git` is corrupt (versions = `~/fakegit` clean copies).
+- None code-wise. Real `git` was corrupt but is now **repaired** (see Important
+  Details + the `SNAPSHOT.md` "Git repair" section).
 - `AGENTS.md` still describes the **removed news channel** (Channel 1) — it is
   otherwise current (market / Word / machine / wire sections are present). A
   news-removal pass on `AGENTS.md` is the natural doc follow-up.

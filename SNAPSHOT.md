@@ -584,5 +584,21 @@ The wire became the whole app and a **game**.
   496), with no resize nudge.
 - Snapshot of this run: `~/fakegit/mrfluffyv1.15` (clean copy, no `.git`) +
   `snapshots/CONVERSATION_2026-10-12.md`. `AGENTS.md` still documents the removed
-  news channel — a news-removal pass is the natural doc follow-up. Real `git`
-  remains corrupt; do not repair it.
+  news channel — a news-removal pass is the natural doc follow-up.
+
+## Git repair (2026-10-12)
+
+The repo's `git` had gone corrupt (three loose objects truncated to 0 bytes —
+the commit `HEAD` pointed at, a tree, and a blob — plus stray nulls in the
+reflog). It was **repaired**, not re-initialised, so the full history is back:
+- the `.git` dir was backed up first to `~/mrfluffy-git-broken-20261012-000523.tgz`;
+- `master` was repointed at the newest **intact** commit `64fa708` (machinevision
+  Phase 0 — the newest entry in `.git/logs/HEAD`; the truncated `6734eae9…` was
+  never reachable from any real commit);
+- the three empty objects and the stale index were removed, and the stray null
+  bytes stripped from the reflogs.
+- `git fsck` is clean; the branch now carries the whole history plus
+  **`8ad1672` mrfluffy: … the wire a game (v1.15)** as the working-tree commit.
+
+The old (broken) `.git` is backed up at `~/mrfluffy-git-broken-20261012-000523.tgz`;
+do not delete it until the repair has proven itself.
