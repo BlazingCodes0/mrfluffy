@@ -126,31 +126,16 @@ in the shell stuff to secure our game because we don't want to make it easy for
 anyone to hack our users or the other way around — a defense system against
 malicious users who are not here to just play."* Built on top of the presence
 relay, all stdlib, all tested:
-- **Ghost layer (encryption + signing).** `MRFLUFFY_WIRE_KEY` (same phrase on the
-  relay and every player) derives a 32-byte key via PBKDF2-HMAC-SHA256
-  (200k iters); every `/pose` and `/peers` payload is sealed as an envelope
-  (random 12-byte nonce, bytes woven with an HMAC-SHA256 keystream, signed with
-  an HMAC, constant-time verification). A listener on the wire sees only
-  ciphertext; a pose not signed with the key is refused (401). Keyless client ↔
-  sealed floor and sealed client ↔ open floor both refuse honestly — mismatch is
-  visible, never silent. Each client also carries a **random per-session ghost-id**
-  (`secrets.token_hex(16)`) bound to its name on first contact; posing/leaving
-  under someone else's name with the wrong ghost-id is refused (403) and cannot
-  stomp the real user's pose.
-- **Ward layer (defense).** Body size cap (413 over 4 KiB), per-IP request rate
-  throttle (429), per-name burst cap, a bounded crowd (`MAX_PEERS`), expulsion of
-  expired peers, and every refused attempt appended to
-  `logs/.wiregate.events.log` and counted in the relay's `ward` counter.
-- **Visible in the game.** The market HUD shows `ghost layer: hardened ·
-  payloads encrypted + signed (PBKDF2→HMAC weave) · ward refused N attempt(s)`
-  (amber when the floor is open) plus the legend/honesty/controls block; the
-  floating menu carries the same line. `wiregate.py --serve` prints the layer
-  status + how players join (`MRFLUFFY_GATE_URL`, `MRFLUFFY_GATE_ADDR/PORT`).
-- Tests: plain cross-visibility unchanged; forged ghost-id → 403 with the real
-  pose untouched; oversized shell → 413; keyless client refused by a sealed
-  floor; sealed pair cross-visibility with `/peers` staying encrypted; wrong-
-  phrase sealed pose → 401 with the real pose kept; Xvfb render + menu smoke
-  on a hardened floor.
+- **Ghost layer (real TLS + signed authenticity).** `MRFLUFFY_WIRE_KEY` (same phrase
+  on the relay and every player) signs each shell so nobody without the phrase can
+  speak on a sealed floor; the relay is **HTTPS by default** (`config/wire_tls/relay.pem`
+  self-signed, pinned) — real TLS transport. `wiretls.py` generates/loads the cert;
+  `MRFLUFFY_WIRE_TLS=0` reverts to plain HTTP; `MRFLUFFY_WIRE_CA` pins a remote relay's
+  cert; `MRFLUFFY_WIRE_TLS_INSECURE=1` is an honest opt-out. The homemade XOR weave is
+  retired (v2 HMAC signatures); legacy v1 shells are rejected. The ward layer (ghost-id
+  binding, per-IP rate limits, per-name bursts, bounded crowd, oversized shells) remains
+  in force. The HUD and CLI describe the TLS state + short fingerprint, key requirement,
+  and ward count.
 
 ### 7. The reorganized floor + the step-off fix (2026-10-11)
 User: *"the main wire home is too crowded so lets make room for blackhorse so its
@@ -422,22 +407,96 @@ travel through or exit back to the chapters."*
   roads (all outbound), 3 inhabitants, **0 dark figures** (nothing in the local logs is
   striking), 60 users (system accounts), JSON-serializable, summary renders clean.
 
-- **EXACTLY WHERE WE LEFT OFF.** Phase 0 is committed as this snapshot. **Phase 1 — the
-  machine world in the renderer — is NOT started.** The last thing outstanding is one
-  design choice: *how the machine world is entered in Wire Vision.* The user was asked
-  and instead answered **"save snapshot, add note exactly where we left off."**
-  - **Open decision (Phase 1, first thing to resolve):** entry point — (a) a **hatch on
-    the wire floor due +z** (the one free plaza wedge; market is +x, Word −x, the pier
-    −z) reached with `E` and left with `Home` *(recommended, mirrors market/Word/
-    exchange)*; (b) a **button in the Vision tab bar**; or (c) **both**.
-  - **Phase 1:** a "machine" room in `wiregame.py` — render doors/roads/inhabitants from
-    `machinevision.build()`, dark figures for intruders, and the **x-ray** toggle that
-    reveals (through walls) the door a figure has touched.
-  - **Phase 2:** bird dispatch — **crow** = evidence/recon (read-only), **finch** =
-    quarantine/contain (local), **raven** = scope gate; auto-response + a manual
-    "send the birds out" menu.
+- **Phase 1 DONE (2026-10-11) — the machine room in `wiregame.py`.** The entry-point
+  decision the user was asked for was answered **"both"**: the machine is entered either
+  way. Recap of what was built:
+  - **A hatch on the wire floor, due +z** — the one free plaza wedge (market +x, Word −x,
+    pier −z). `MACHINE_HATCH_POS = [0.0, 0.06, 23.0]`; a lit hex rim + pulsing shaft in
+    `_machine_hatch()`, a floor label, and an `E` prompt. `E` enters (`_enter_machine`),
+    `Home` / the up-hatch gate leaves (`_leave_machine`), `B` rebuilds live, `X` toggles
+    x-ray.
+  - **A button in the Vision tab bar** — `b_machine` ("⧉ the machine" / "↩ leave the
+    machine"), handled by `_machine_btn`, kept in sync via the new `machine_changed`
+    signal + `_refresh_machine_ui`.
+  - **The room** (`MACHINE_FLOOR_Y = -160.0`, below the Exchange): terminal-green theme,
+    a diagnostic ring grid floor, the shell's wall broken at each door, roads as live
+    paths (inbound red / external blue / internal teal) with a crawling pulse, the core
+    as a breathing hex monolith (THIS host), a door for every listening socket bearing
+    the program that owns it, extra inhabitants beside the core, and **dark figures** for
+    intruders — all read straight from `machinevision.build()`.
+  - **x-ray** (`X`): draws the line through the wall to the door a figure has *touched*,
+    only when a real port is visible in `figures[].touched` — never a guess.
+  - **HUD** (`_hud_machine`): the machine's name + the honesty line (observed pid/socket/
+    port vs inferred meaning; "read live from /proc, not the network"), live counts,
+    kernel/uptime/x-ray state, in-world labels over the nearest doors/figures, and a
+    nearest prompt.
+  - **Verified**: compiles/imports; offscreen smoke test enters, draws (sky + scene +
+    x-ray), lists labels, walks door→figure→return, and leaves cleanly; the tab button
+    toggles both ways. `set_world` resets the room; `_net_tick` / glyph rain / `_toggle_fly`
+    all early-out while inside.
+  - **Next (Phase 2):** bird dispatch — see below (now DONE, read-only with an arm gate).
   - **Phase 3:** the auto-defend engine — detect → contain **on this host only** (host
     firewall block / quarantine), logged, scope-gated. No packet aimed at anyone else.
+    **DONE** — see below.
+  - **Phase 3 DONE (2026-10-11) — auto-defend, gated behind arm + auto.** `M` (two
+    presses: confirm, then on) turns it on, but **only while the birds are armed** — two
+    explicit consents. A 3s heartbeat (`_machine_autoguard_beat`) reads THIS host live
+    (`machinevision.build()`) and, for every dark figure backed by real defensive
+    evidence (`confidence == "observed"`; the `inferred` live-road figures are never
+    auto-acted on), calls `birdguard.contain()` with an `[auto]` reason — one action per
+    beat, per-source 30s cooldown, and all of birdguard's guardrails (own/gateway/
+    reserved sources refused; skipped quietly). A successful catch rebuilds the room so
+    the figure shows HELD, releasable with `L`. Standing the birds down (`K`) drops
+    auto-defend; leaving the machine turns it off. HUD shows the auto state; it never
+    sends a packet and never aims at another host. Verified offscreen: M refused while
+    unarmed, two-press arm then two-press auto, observed figure auto-contained (dry),
+    inferred/held/self/unusable sources all skipped, no double-fire under cooldown, and
+    no action at all while unarmed. `MRFLUFFY_BIRDGURD_LIVE=0` keeps it a dry run.
+  - **Phase 4 DONE (2026-10-11) — live vision (the knob).** The machine room is no longer
+    a still snapshot: a "live" selector in the Vision bar (4 positions: `auto`, `off`,
+    `delta`, `capture`) plus a persisting `config/wire_settings.json` (`wiresettings.py`,
+    new). `off` = snapshot (`B` rebuilds). `delta` = a 1 Hz read of the kernel counters
+    (`/proc/net/dev` bytes+packets per interface, `/proc/<pid>/io` for the inhabitants in
+    the room, `/proc/stat`, `/proc/diskstats`), deltas smoothed and painted at 60 fps:
+    motes on the ring ∝ real pkt/s, the core ring brightens with real cpu, the disk I/O
+    spine rises with real bytes, and a busy writer is named in the HUD
+    (`writing: <proc> N MB/s` — a file copy, seen live). `capture` = a bounded `tshark`
+    stream (`_PacketReader`, `sudo -n`, only while inside the room) drawn as real packet
+    motes; falls back honestly on error. `auto` benchmarks THIS host once (cores, load, a
+    tiny timed loop — local only) and picks: 8+ cores/low load/fast → `capture`; any
+    multi-core → `delta`; only a 1-core box → `off`. Verified offscreen: startup auto →
+    `delta` (this host: 4 cores), knob switches modes and persists, delta deltas compute,
+    `off` stops the timer, capture starts only inside the room and stops on leave, and the
+    packet line-parser round-trips. Nothing is invented — every number is a counter read.
+
+- **Phase 2 DONE (2026-10-11) — the birds, read-only with an explicit arm gate.** The
+  user chose **"read-only now, arm later"**: the birds observe and draft; nothing acts
+  until the room is explicitly armed, and even then only finch acts, host-local.
+  - **`machinevision.py`** gains a read-only `birds` block (`_crow_bird`, `_finch_bird`,
+    `_raven_bird`): the newest crow report's age/verdict/`CROW RETURNED` line; finch's
+    baseline ssid/trusted/net, quarantine file count+bytes, exec-watch count; raven's
+    heartbeat `up`/gw/guard/strikes + the `control.json` switches. Two new source rows.
+    It only *reads* — the machine vision still never acts.
+  - **`birdguard.py` (new)** — finch's hand, and the ONLY acting module: `contain(ip)`
+    adds one team-owned rule to a private `MRFLUFFY-QUAR` iptables chain hooked into
+    INPUT, so packets arriving **from that source at THIS NIC** are dropped. Never sends
+    a packet, never touches another host; `release(ip)` / `release_all()` undo it. Every
+    attempt is logged to `logs/birdguard.log`, the live set to `logs/birdguard.json`.
+    Guardrails refuse (and log) non-IPv4, loopback/multicast/link-local/reserved, our own
+    addresses, and the default gateway (containing it would cut our lifeline). `sudo -n`
+    only (the host grants NOPASSWD iptables). `MRFLUFFY_BIRDGURD_LIVE=0` forces dry-run.
+  - **The room** (`wiregame.py`): three low-poly birds (crow / finch / raven) perch above
+    the core in a fixed ring; `E` on a bird plays its read-only finding. `K` arms (two
+    presses: confirm, then arm) / stands down; `L` releases all (two presses). When armed,
+    `E` on a **dark figure** asks finch to contain it — first press arms a 5s confirm,
+    second press fires `birdguard.contain()` (a host-local DROP, shown as HELD, releasable
+    with `L`). HUD shows the birds' live state + armed/held counts; shields/labels mark
+    HELD figures green and the finch "ARMED". `_enter_machine` mirrors the real ledger,
+    `_leave_machine` stands the birds down.
+  - **Verified**: compiles/imports; offscreen smoke enters, paints (birds + scene), talks
+    to a bird, arms, contains a figure two-press (dry), releases, leaves. `birdguard`'s
+    guardrails unit-tested (gateway/self/loopback/broadcast refused; ledger round-trips
+    with a fake `_sudo`). No real iptables rule was written during testing.
 
 ## Current state (end of 2026-10-11)
 
@@ -455,11 +514,26 @@ travel through or exit back to the chapters."*
 - Committed `9a4c9b1` (build the Exchange + DuckDuckGo), snapshot
   `~/fakegit/mrfluffyv1.11` = `9a4c9b1`; `7029213` = v1.10. The packet-theatre work
   (section 15) is on top.
-- **Machine world (section 16) — Phase 0 only.** `machinevision.py` **new** (a local,
-  defensive model of THIS host from `/proc` + raven's logs; 0 dark figures right now).
-  `wiregame.py` is **not** yet touched. Next thing to do: pick the **Phase 1 entry
-  point** (hatch on the wire floor due +z / a Vision-tab button / both), then render
-  the machine room + dark figures + the x-ray.
+- Committed `mrfluffyv1.13` (machine world, section 16 — Phase 1 room + Phase 2 birds).
+  `~/fakegit/mrfluffyv1.13` is the fresh copy. Note: this repo's real `git` is corrupt
+  (`.git/objects` empty files, `HEAD` an invalid pointer; `git log/status/fsck` all fail)
+  — so versions are kept as clean copies in `~/fakegit` (v1.13 newest; v1.12 unrecorded;
+  v1.11 = `9a4c9b1` and v1.10 = `7029213` were real, pre-corruption commits).
+  The conversation behind v1.13 is snapshotted to `snapshots/CONVERSATION_2026-10-11.md`.
+- Committed `mrfluffyv1.14.2` (real TLS for the presence relay: HTTPS + pinned
+  self-signed certs via `wiretls.py`; TLS replaces the homemade XOR weave, HMAC
+  signatures retained; `MRFLUFFY_WIRE_TLS_CA`/`MRFLUFFY_WIRE_TLS_INSECURE` control
+  trust). `~/fakegit/mrfluffyv1.14.2` is the fresh copy.
+- **Machine world (section 16) — Phase 1 + Phase 2 DONE.** `machinevision.py` (a local,
+  defensive model of THIS host from `/proc` + raven's logs; 0 dark figures right now) and
+  `birdguard.py` **new** (finch's hand — the single host-local, reversible, logged
+  containment primitive). `wiregame.py` has the machine room: a hatch on the wire floor
+  due +z **and** a Vision-tab button, doors/roads/inhabitants, dark figures, the `X`
+  x-ray, and the **birds** (crow/finch/raven, read-only until `K` arms them; finch may
+  then contain a dark figure host-locally, `L` releases), **Phase 3 auto-defend**
+  (`M`, armed-only; finch detects & contains observed figures on its own, host-local),
+  and **Phase 4 live vision** (the Vision-bar live knob + `wiresettings.py`: off / delta
+  / capture / auto, reading the host's own kernel counters). Section 16 is complete.
 - Open threads: (a) more gates on the Exchange ring (the hall is built for a
   crowd of services — a search is the first); (b) make the amber reticle
   lock/label the nearest real object in 3D; (c) polish the market further (crowd
@@ -474,3 +548,41 @@ travel through or exit back to the chapters."*
   outward gate is the first step out for real — it opens into the Exchange, whose
   gates (DuckDuckGo, so far) really serve the web, and nothing is ever dialed that
   the user did not name.
+
+## Current state (v1.15 — 2026-10-12)
+
+The wire became the whole app and a **game**.
+- **Market readouts + lean arrows** (`wiregate.py` + `wiregame.py`): each platform
+  shows its per-interval SignalBot read (the bot's own written snapshot, replayed)
+  and a bold green/red/amber/grey LEAN arrow; `wiregate._signal_lean()` is a
+  transparent vote over the bot's named fields. The world never runs the bot.
+- **Candle room** (`candlevision.py` new + `wiregame.py`): the market's centre
+  column is a door; the interval is chosen there. `blackhorse/logs/candles_<iv>.json`
+  (real Kraken OHLCV) is joined to SignalBot's own rows with the ±5% guard from
+  `trade/validate_playbook.py` (shows `rows_joined / n`); fly to a candle for its
+  OHLCV (observed) + the bot's read + what happened next (inferred).
+- **Agent-settings `?` fix** (`wiregate.py` + `wiregame.py`): `PROFILE_DEFAULTS`
+  from `decider.json` + `base = cfg/policy`; the editor shows the effective value
+  (agent_6 = 0.15/0.80) and `_do_save` writes only the fields that really changed.
+- **News channel dropped.** `app.py` rewritten (no news/uplink UI), boots straight
+  into **Wire Vision full screen**; `daemon.py` runs only the wire cycle;
+  `wireout.py` carries its own `_load_json`/`_parse` (no `readout`/`news` import).
+  `readout.py`/`news.py` remain on disk but unreferenced at runtime.
+- **In-game menu** (`wiregame.py`): Tab or "☰ menu" → Settings (walk/fly/boost/look
+  speed, live vision, real names), Controls (every key + ↑↓←→), Resume, Toggle full
+  screen, and Close Mr.Fluffy (→ app quit).
+- **Flight is fun** (`wiresettings.py` + `wiregame.py`): walk/fly/boost/look knobs
+  (clamped, persisted); **Shift** boosts walking and flying; seeded **speed lines**
+  fly only when you are really moving fast; a small `N u/s ⚡ ×boost` tag.
+- **Smooth mouse-look**: **left-click** captures the mouse (hidden, pinned to
+  centre) and moving turns the view while you keep walking/flying; **Esc** or
+  **right-click** frees it; the menu frees it and closing re-grabs it.
+- **Menu glitch fixed**: overlays/the market panel are children of the
+  `QOpenGLWidget` (they compose every frame), and `_reflow_overlays()` activates the
+  layout + re-places on the **next event-loop tick** (`QTimer.singleShot(0, …)`) once
+  children are polished — so a switched page is sized right at once (291 → 343 →
+  496), with no resize nudge.
+- Snapshot of this run: `~/fakegit/mrfluffyv1.15` (clean copy, no `.git`) +
+  `snapshots/CONVERSATION_2026-10-12.md`. `AGENTS.md` still documents the removed
+  news channel — a news-removal pass is the natural doc follow-up. Real `git`
+  remains corrupt; do not repair it.

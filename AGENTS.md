@@ -144,6 +144,22 @@ gated writes), the rest lives in `wiregame.py`.
   scalloped sigil pad, beacon of light, twin gems; the loop runs a pulse of light
   out to each pad), but that is strictly dressing — the labels and green/red are
   the real snapshot, tinted.
+- **Each platform shows its interval's SignalBot read, in the world.** A platform
+  is tied to the interval(s) its agent trades (`policy_overrides.strategy_intervals`,
+  else the interval its `channels` carry). `wiregate.snapshot()` reads the bot's own
+  snapshot (`logs/signal_latest.json` / `logs/signals/<PAIR>.json`) and attaches, per
+  interval, the same read the "Run SignalBot now" pane shows — action, confidence,
+  strength, RSI, spread, MA10−MA30, MA20/MA50 cross, range/stop/target, advisor bands,
+  and **the small-timeframe rule** where a 15m-or-smaller lane gates entry/exit on the
+  **60m lane's own strength** (`entryEligible→60m`, `exitEligible→60m`, and the
+  `60m strength gate` note). Fly near a platform and the whole block is laid out as a
+  floating panel beside it — **no menu** — and a compact lean tag floats with the name.
+- **The direction arrow is the SignalBot's LEAN.** A bold arrow stands over each
+  platform — **green points up, red points down**, amber = flat, grey = no read —
+  readable from across the floor. The lean is a transparent vote over the bot's own
+  named fields (trend, strength direction, MA-cross bias, range signal, advisor band,
+  buy/sell score); `wiregate._signal_lean()` computes it, the world only points it.
+  It is **not a promise and not an order** — the panel names the fields that carried it.
 - The agent settings **panel floats over the world** (a sibling of the GL view,
   translucent, rounded, with an **✕** in its corner — H also toggles it), so
   editing an agent never pops a separate window or breaks the view: the market
@@ -160,7 +176,8 @@ gated writes), the rest lives in `wiregame.py`.
   its own — only when you press Save/Create.
 - Same honesty rule as the dive, made plain in the HUD: platforms/balance/crowd
   are **real**; the floor, the columns and the colours are **dressing**, and green
-  /red are just a read of the files.
+  /red are just a read of the files. The SignalBot read and the lean arrow are the
+  bot's own written snapshot, replayed — the world never runs the bot or trades.
 - **The ghost layer — sealed traffic.** When `MRFLUFFY_WIRE_KEY` is set (same
   phrase on the relay and every player), every pose and every 'who is here'
   answer rides as an encrypted + signed shell: a PBKDF2-derived key drives an
@@ -178,6 +195,45 @@ gated writes), the rest lives in `wiregame.py`.
   every refused attempt is logged to `logs/.wiregate.events.log` and surfaced as
   the ward count in the HUD. This is real, working protection (tested), not
   scenery.
+
+## The candle room (DOT/USD's tape — reached from the market's centre column)
+
+Inside the market, at the centre of the floor where the loop-heart already beat,
+stands a column strung with candle-lights. `E` at it opens **the candle room**:
+blackhorse's own price history read as a place you fly through. Files:
+`candlevision.py` (the model) + the room lives in `wiregame.py`.
+
+- **You choose the interval at the door.** `E` at the column opens a chooser
+  listing every tape that has a candle dump on disk — its bar count, how many
+  candles carry a bot read, and how long ago it was dumped — and a number key
+  enters that room; `Esc` cancels. The intervals offered are the ones actually
+  present (`15m` / `60m` / `240m` / `1440m`), never a menu of names with no file
+  behind them.
+- **The room is the tape.** One tower per candle down a long hall — green when
+  the close is above the open, red when below, a wick to the true high and low,
+  a polyline through every close — the **newest bar glowing as it ticks**, with
+  the current SignalBot read pinned as a "SIGNALBOT NOW" panel. `WASD` fly,
+  `Space`/`C` up and down, `B` rebuild from the files, `Home` (or the entrance
+  gate) leaves back up into the market.
+- **Fly to a candle and its whole read floats beside it** — the same "no menu"
+  rule as the platforms. The panel gives the bar's **observed** OHLCV and, where
+  the bot left a row for that candle, its own **inferred** read: range signal,
+  zone, strength and its direction, the moving averages and spread, the bands and
+  the nearest support, and **what actually happened next** (the forward returns
+  and the 5-bar excursion). Where no row joined, the panel says so and the light
+  is the bar's own shape.
+- **Built from local files only, joined the house's own way.** `candlevision.py`
+  reads `blackhorse/logs/candles_<iv>.json` (real Kraken OHLCV) and SignalBot's
+  own saved rows (`sb_rows.json` / `sb_rows_<iv>_dump.json`), joined by bar index
+  with the **±5% price guard** the house already uses in
+  `trade/validate_playbook.py` — it counts and shows how many bars actually
+  carry a read (`rows_joined / n`). It never runs the bot, never calls the
+  exchange, never invents a bar (the research tools `run_pair_rows.js` /
+  `dump_candles.js` are what refresh the dumps, offline).
+- **Honesty, as everywhere:** each candle, and any bot read, is **observed**
+  (a real OHLCV bar; a row the bot already wrote). The mood, the colours, the
+  glow and the hall are **dressing** — green/red is just close-vs-open, and the
+  candle room is a memory you walk, not a live feed.
 
 ## The room of the Word (Learn Islam — reached from the wire floor)
 
@@ -233,6 +289,76 @@ local copy) + `quran.py` (opens it) + `quranworld.py` (the motif engine) +
   the hall itself is dressing. Learning comes from a teacher and the tafsir, not
   from the wire.
 
+## The machine (this host — reached from the wire floor)
+
+On the LAN floor, on its own lit hex pad due +z (the one free plaza wedge — market
+is +x, the Word −x, the pier −z) sits **the machine**: a hatch down into **THIS
+host**, the box under your feet. Files: `machinevision.py` (the model) + the room
+lives in `wiregame.py`.
+
+- **Two ways in, same room.** Fly to the hatch and press `E`, or press the
+  "⧉ the machine" button in the Vision tab bar. `Home` (or the up-hatch gate)
+  climbs back to the wire; `B` rebuilds the room live; `X` toggles **x-ray**.
+- **It reads INWARD, live.** `machinevision.build()` reads `/proc` right now —
+  `net/tcp`,`tcp6`,`udp`,`udp6`, the per-pid `fd`→socket inode map, `comm`/
+  `cmdline`/`status`/`exe`, `/etc/passwd`, `/sys/class/net`, `/proc/uptime` +
+  `osrelease` — plus raven's own local logs. It touches **no network, sends no
+  packet, runs no tool, calls no model, and never attacks.** Reading a host's own
+  tables is not an intrusion; nothing leaves the box.
+- **What the room is made of (real ground truth, dressed low-poly):**
+  - **doors** — every listening socket (a way in), with the program that owns it;
+  - **roads** — live connections, a path already drawn (inbound red, external
+    blue, internal teal) with a pulse crawling along it;
+  - **inhabitants** — the processes standing at a socket; the shell's **core** is
+    THIS host itself;
+  - **dark figures** — intruders, drawn **only** from local defensive evidence
+    (lifeline strikes/guard acts, hostile lines in raven's event log that *name a
+    source*, Suricata alerts, and public inbound roads — the last marked
+    **inferred**). A lifeline health blip ("no default route") is **not** a figure;
+    a strike with no source is not a figure. A quiet machine → **no figures**, and
+    that is a complete, honest answer.
+- **x-ray** (`X`) shows, through the shell's wall, the door a dark figure has
+  *touched* — and only when a real port is visible in that figure's evidence,
+  never a guess. It shows where an intruder has reached, not what they intend.
+- **Observed vs inferred, made plain in the HUD:** a pid, a socket, a port, a
+  path, a source IP/MAC are **observed (fact)**; the meaning of traffic, a
+  device's character, a figure's intent are **inferred (a story)**. The room is a
+  live read, not a memory — unlike the open sea, this machine has a bottom.
+- **The birds (crow / finch / raven) — built, read-only until armed.** They perch above
+  the core; `E` plays each bird's read-only finding (crow = the newest report's verdict;
+  finch = quarantine/baseline state; raven = lifeline up/gw/guard + the control switches).
+  **`K` arms them** (two presses: confirm, then arm) and stands them down; when armed,
+  **only finch acts**, and only on THIS machine: `E` on a dark figure then CONTAINS its
+  source (`E` again to confirm within 5s) via `birdguard.py` — a host-local `iptables`
+  DROP in a private `MRFLUFFY-QUAR` chain — so packets arriving *from* that source at
+  this NIC are dropped. It never sends a packet and never aims at another host; `L`
+  releases all (two presses). Guardrails refuse our own addresses, the default gateway,
+  and unusable/reserved sources; every attempt is logged (`logs/birdguard.log` +
+  `birdguard.json`). `MRFLUFFY_BIRDGURD_LIVE=0` makes it a dry run.
+- **Auto-defend (Phase 3) — built.** `M` turns auto-defend on (two presses: confirm,
+  then on) **only while the birds are already armed** — so it takes two explicit
+  consents, the arm and the auto toggle. Once on, a 3s heartbeat reads THIS host live
+  (`machinevision.build()`) and, for each **dark figure backed by real local defensive
+  evidence** (never the `inferred` live-road figures), asks finch to contain its source
+  via `birdguard` — one action per beat, per-source 30s cooldown, all of birdguard's
+  guardrails (own/gateway/reserved sources refused). A successful containment rebuilds
+  the room and shows as HELD, releasable with `L`. Standing the birds down (`K`) also
+  drops auto-defend; leaving the machine turns it off. It still only ever drops packets
+  *from* a source at THIS NIC — it never sends a packet and never aims at another host.
+- **Live vision (the knob) — built.** The machine room is no longer only a snapshot;
+  a "live" selector in the Vision bar (and `wiresettings.json`) chooses how live it is:
+  `off` (snapshot, rebuild with `B`), `delta` (a 1 Hz read of the kernel counters —
+  `/proc/net/dev` bytes+packets, `/proc/<pid>/io`, `/proc/stat`, `/proc/diskstats` —
+  interpolated by the 60 fps paint; roads/inhabitants move from real rates, the core
+  shimmers with real cpu, a file being copied shows as the disk I/O spine rising and a
+  `writing: <proc> N MB/s` line naming the real process), `capture` (a bounded
+  `tshark` stream of real packet motes — heavy), and `auto`. **`auto` benchmarks THIS
+  host once** (cores, load average, a tiny timed loop — local only, no network/tool)
+  and picks: a strong box (8+ cores, low load, fast) gets `capture`; any multi-core box
+  gets the near-free `delta`; only a truly tiny single-core box falls back to `off`.
+  Explicit choices are always honoured. It reads the host's own counters, so it is the
+  same ground-truth rule as everything here — never an invented number or packet.
+
 ## Rules both channels share
 * **The Qur'an is the word of Allah and is never a game.** The room of the Word
   may only show its authentic, sourced text and never an image or mockery of
@@ -247,4 +373,4 @@ local copy) + `quran.py` (opens it) + `quranworld.py` (the motif engine) +
   should get the whole picture in ten seconds.
 * Brain calls are budget-gated and shared between the two channels — pick reads
   that matter.
-* Tone: spice, not a manual. Short. Warm. One step ahead. Name the single next thing.
+* Tone: spice, not a manual. Short. Warm. One step ahead. Name the single next thing.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    

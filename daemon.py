@@ -1,9 +1,9 @@
 """Mr.Fluffy daemon.
 
-Every check_interval_seconds: refresh news, and if the fingerprint changed AND the
-budget allows, run a news readout cycle; the same for the WIRE channel (its own
-fingerprint, state and files — entirely separate from the news panel). Logged to
-logs/daemon.log. Uses flock so two daemons can never overlap.
+Every check_interval_seconds: run a WIRE readout cycle (its own fingerprint,
+state and files). The news channel has been dropped — Mr.Fluffy is the wire
+now — so only the network analyst runs here. Logged to logs/daemon.log. Uses
+flock so two daemons can never overlap.
 
 CLI:  python3 daemon.py              # run forever
       python3 daemon.py --once       # one check cycle then exit
@@ -11,8 +11,6 @@ CLI:  python3 daemon.py              # run forever
 import fcntl, json, time
 from pathlib import Path
 
-import news
-import readout
 import wireout
 import brain
 
@@ -46,7 +44,6 @@ def one_cycle():
             _log("healed stale egress lockdown (prior process died mid-call)")
     except Exception:
         pass
-    _one_channel("news", readout.run)
     _one_channel("wire", wireout.run)
 
 

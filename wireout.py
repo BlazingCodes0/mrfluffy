@@ -1,11 +1,10 @@
 """Mr.Fluffy — the WIRE channel (the network analyst readout).
 
-Entirely separate from the news channel. Builds a packet from the wire feed
-(wire.py), a wire memory digest of past wire readouts, and a wire schema; asks
-the text-only brain (brain.py, shared budget); parses, renders, persists to its
-own state/history/latest files (logs/wire_*). The news channel never touches
-these files and this channel never touches news files — two totally different
-panels, as they should be.
+The wire channel. Builds a packet from the wire feed (wire.py), a wire memory
+digest of past wire readouts, and a wire schema; asks the text-only brain
+(brain.py, shared budget); parses, renders, persists to its own state/history/
+latest files (logs/wire_*). The news channel has been dropped — Mr.Fluffy is the
+wire now — so this stand-alone module no longer shares anything with a reader.
 
 CLI:  python3 wireout.py --now       # fetch + read + render (one full cycle)
       python3 wireout.py --dry-run   # build packet + fingerprint, no brain, no write
@@ -18,7 +17,6 @@ from pathlib import Path
 
 import brain
 import wire
-from readout import _load_json, _parse
 
 FLUFFY = Path.home() / "mrfluffy"
 LOGS = FLUFFY / "logs"
@@ -28,6 +26,47 @@ READOUTS = LOGS / "wire_readouts.jsonl"
 LATEST = LOGS / "wire_readout_latest.json"
 LOCK = LOGS / "wire_state.lock"
 MEMORY_N = 4
+
+
+def _load_json(p: Path, default):
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return default
+
+
+def _parse(text: str) -> dict:
+    """Pull the readout JSON out of the brain's reply — decode the FIRST complete
+    JSON object and ignore anything after it (preferring one that looks like a
+    readout). Self-contained here so the wire channel depends on nothing in the
+    news reader."""
+    t = text.strip()
+    if "```" in t:
+        parts = t.split("```")
+        for p in parts:
+            p = p.strip()
+            if p.startswith("json"):
+                p = p[4:].strip()
+            if p.startswith("{"):
+                t = p
+                break
+    decoder = json.JSONDecoder()
+    candidates, i = [], t.find("{")
+    while i != -1:
+        try:
+            obj, end = decoder.raw_decode(t, i)
+        except (json.JSONDecodeError, ValueError):
+            i = t.find("{", i + 1)
+            continue
+        if isinstance(obj, dict):
+            candidates.append(obj)
+        i = t.find("{", end)
+    if not candidates:
+        raise ValueError("no JSON object found in brain reply")
+    for c in candidates:
+        if any(k in c for k in ("one_liner", "notes", "confidence", "what_changed")):
+            return c
+    return candidates[0]
 
 
 def _memory() -> str:

@@ -46,10 +46,12 @@ To run a hardened floor, set the same MRFLUFFY_WIRE_KEY on the relay and on each
 player:  MRFLUFFY_WIRE_KEY="a phrase you all know" python3 wiregate.py --serve
 """
 from __future__ import annotations
-import base64, contextlib, fcntl, hashlib, hmac, json, math, os, secrets
+import base64, calendar, contextlib, fcntl, hashlib, hmac, json, math, os, secrets
 import socket, struct, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import wiretls
 
 FLUFFY = Path.home() / "mrfluffy"
 BH = Path.home() / "blackhorse"
@@ -60,6 +62,17 @@ PORTFOLIO_JSON = BH / "logs" / "portfolio.json"
 EXIT_WATCH_JSON = BH / "logs" / "exit_watch.json"
 LOOP_STATE_JSON = BH / "logs" / "loop_state.json"
 PROFILES_JSON = BH / "config" / "profiles.json"
+# blackhorse's own decider defaults — the base layer its agents.policy_for()
+# starts from before the profile's cfg and the agent's overrides are layered on.
+DECIDER_JSON = BH / "config" / "decider.json"
+# the SignalBot's own snapshots — the bot's read of each interval, written by
+# blackhorse's signalbot.py (logs/signal_latest.json is the GUI/primary pair;
+# logs/signals/<PAIR>.json is each pair's own lane set).
+SIGNAL_LATEST_JSON = BH / "logs" / "signal_latest.json"
+SIGNALS_DIR = BH / "logs" / "signals"
+
+# the canonical SignalBot lanes, channel name -> the interval it carries
+_CH_INTERVAL = {"ripple": "15m", "wave": "60m", "tide": "240m"}
 
 MARKET_FLOOR_Y = -80.0        # the market is a place below the wire's strata ring
 MARKET_R = 54.0
@@ -79,11 +92,16 @@ EDITABLE = {
 PAIRS = ["DOT/USD", "ETH/USD", "BTC/USD", "SOL/USD", "XRP/USD"]
 
 PROFILES = {}
+# the decider defaults blackhorse layers the profile cfg on top of; so a panel
+# can show the SAME effective value the blackhorse agent view shows.
+PROFILE_DEFAULTS = {}
 
-# ---- the ghost layer: encryption + signing of the online traffic --------------
-# stdlib only: PBKDF2 key derivation + an HMAC-SHA256 keystream ("ghost weave")
-# for secrecy, HMAC for integrity, and a per-session ghost-id so names cannot be
-# impersonated by someone who is already on the floor.
+# ---- the ghost layer: signing of the online traffic --------------------------
+# Secrecy is now real TLS (wiretls.py) — a pinned relay certificate — not a
+# homemade weave. What remains here is authenticity: when MRFLUFFY_WIRE_KEY is
+# set, every pose carries a small HMAC-SHA256 signature, so nobody without the
+# phrase can speak on a sealed floor. (Legacy v1 shells — the old XOR weave — are
+# still opened, so an un-updated player is refused, not confused.)
 
 GHOST_KEY_ENV = "MRFLUFFY_WIRE_KEY"
 GHOST_SALT = b"mrfluffy-wire-ghost-v1"
@@ -106,6 +124,7 @@ def _ghost_key():
 
 
 def _ghost_xor(key: bytes, nonce: bytes, data: bytes) -> bytes:
+    """Legacy v1 weave — kept only to open shells from an un-updated player."""
     out = bytearray()
     ctr = 0
     i = 0
@@ -120,29 +139,36 @@ def _ghost_xor(key: bytes, nonce: bytes, data: bytes) -> bytes:
 
 
 def _ghost_envelope(key: bytes, payload: dict) -> dict:
-    """Seal a payload: random nonce, weave the bytes, sign the sealed shell."""
+    """Sign a payload (v2): the plaintext rides inside TLS; the HMAC proves the key."""
     nonce = secrets.token_bytes(12)
     plain = json.dumps(payload).encode("utf-8")
-    ctext = _ghost_xor(key, nonce, plain)
-    sig = hmac.new(key, nonce + ctext, hashlib.sha256).hexdigest()
-    return {"v": 1, GHOST_TAG: True,
+    sig = hmac.new(key, nonce + plain, hashlib.sha256).hexdigest()
+    return {"v": 2, GHOST_TAG: True,
             "n": base64.b64encode(nonce).decode("ascii"),
-            "d": base64.b64encode(ctext).decode("ascii"),
+            "d": base64.b64encode(plain).decode("ascii"),
             "s": sig}
 
 
 def _ghost_open(key: bytes, env: dict):
-    """Open a sealed shell. Returns the payload, or None when invalid/forged."""
+    """Open a signed shell (v2) or a legacy woven shell (v1). None when forged."""
     try:
         if not env or env.get(GHOST_TAG) is not True:
             return None
         nonce = base64.b64decode(env.get("n", ""))
-        ctext = base64.b64decode(env.get("d", ""))
+        blob = base64.b64decode(env.get("d", ""))
         sig = env.get("s", "")
-        good = hmac.compare_digest(sig,
-                                   hmac.new(key, nonce + ctext,
-                                            hashlib.sha256).hexdigest())
-        if not good or not nonce:
+        if not nonce:
+            return None
+        if env.get("v") == 2:
+            good = hmac.compare_digest(sig, hmac.new(key, nonce + blob,
+                                                     hashlib.sha256).hexdigest())
+            if not good:
+                return None
+            return json.loads(blob)
+        ctext = blob
+        good = hmac.compare_digest(sig, hmac.new(key, nonce + ctext,
+                                                 hashlib.sha256).hexdigest())
+        if not good:
             return None
         return json.loads(_ghost_xor(key, nonce, ctext))
     except Exception:
@@ -189,7 +215,7 @@ def _ago(sec):
 def _refresh_profiles() -> dict:
     """The personalities blackhorse ships with — fetched from blackhorse's OWN
     registry (trade/agents.py PROFILES) so we never hardcode a stale list."""
-    global PROFILES
+    global PROFILES, PROFILE_DEFAULTS
     env = dict(os.environ)
     code = ("import sys,json; sys.path.insert(0, %r); "
             "import agents; print(json.dumps(agents.PROFILES))" % str(BH / "trade"))
@@ -199,6 +225,14 @@ def _refresh_profiles() -> dict:
         PROFILES = json.loads(r.stdout or "{}")
     except Exception:
         PROFILES = PROFILES or {}
+    # the decider defaults are the base the profile's cfg sits on: read them
+    # straight from blackhorse's own config so a blank override shows the same
+    # value blackhorse's agents.policy_for() would resolve.
+    try:
+        d = _load_json(DECIDER_JSON, {})
+        PROFILE_DEFAULTS = d if isinstance(d, dict) else {}
+    except Exception:
+        PROFILE_DEFAULTS = PROFILE_DEFAULTS or {}
     return PROFILES
 
 
@@ -242,6 +276,262 @@ def _derive(agent: dict, positions: list, exit_watch: dict) -> dict:
     return "sell"
 
 
+# ---- the SignalBot read, attached to each platform --------------------------
+# The platform an agent stands on is tied to an interval (its strategy_intervals,
+# else the interval its channels carry). We show that interval's SignalBot read
+# exactly as the "Run SignalBot now" pane does — including the small-timeframe
+# rule where a 15m-or-smaller lane gates its entry/exit on the 60m lane's own
+# strength. Everything is read from the bot's own written snapshot; nothing here
+# runs the bot, calls the exchange, or invents a number.
+
+def _num(v, dp=4):
+    """compact number print — '?' for missing (mirrors blackhorse's app _n)."""
+    try:
+        return f"{float(v):.{dp}f}"
+    except (TypeError, ValueError):
+        return "?" if v is None else str(v)
+
+
+def _sig_ago(ts) -> str:
+    try:
+        ep = calendar.timegm(time.strptime(str(ts), "%Y-%m-%dT%H:%M:%SZ"))
+        return _ago(time.time() - ep)
+    except Exception:
+        return "unknown"
+
+
+def _iv_min(iv):
+    """'15m' -> 15; None when the label is not '<n>m'."""
+    try:
+        s = str(iv or "")
+        return int(s.rstrip("m")) if s.endswith("m") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _agent_intervals(a: dict) -> list:
+    """The intervals an agent is tied to: its strategy_intervals, else the
+    intervals its channels carry, else the small lane the loop actually runs."""
+    ov = a.get("policy_overrides") or {}
+    ivs = ov.get("strategy_intervals")
+    if isinstance(ivs, list) and ivs:
+        return [str(x) for x in ivs]
+    chs = ov.get("channels")
+    if isinstance(chs, list) and chs:
+        got = [_CH_INTERVAL[c] for c in chs if c in _CH_INTERVAL]
+        if got:
+            return got
+    return ["15m"]
+
+
+def _pick_channel(chans: dict, iv: str, prefer: list):
+    """The channel carrying interval `iv`, preferring the agent's own channels."""
+    cands = [(n, c) for n, c in chans.items() if str(c.get("interval")) == iv]
+    if not cands:
+        return None, None
+    for want in prefer:
+        for n, c in cands:
+            if n == want:
+                return n, c
+    for canon in _CH_INTERVAL:
+        for n, c in cands:
+            if n == canon:
+                return n, c
+    return cands[0]
+
+
+def _signal_lean(c: dict) -> dict:
+    """The direction the SignalBot's own fields point, as a single lean.
+
+    Not a promise and not an order — a transparent vote over the bot's named
+    readouts (trend, strength direction, MA-cross bias, range signal, advisor
+    band, buy/sell score). The basis names the fields that carried it."""
+    mr = c.get("marketResult") or {}
+    votes = []
+    ts_ = str(mr.get("trendState") or "").lower()
+    if ts_ in ("up", "bull", "rising"):
+        votes.append(("trend " + ts_, 1.0))
+    elif ts_ in ("down", "bear", "falling"):
+        votes.append(("trend " + ts_, -1.0))
+    sd = str(c.get("strengthDirection") or "").lower()
+    if sd == "rising":
+        votes.append(("strength rising", 1.0))
+    elif sd == "falling":
+        votes.append(("strength falling", -1.0))
+    mx = c.get("maCross") or {}
+    if mx.get("available"):
+        v = str(mx.get("verdict") or "")
+        w = 1.0 if v.startswith("real") else (0.5 if v.startswith("borderline") else 0.0)
+        if mx.get("bias") == "bullish":
+            votes.append(("MA-cross bullish", w))
+        elif mx.get("bias") == "bearish":
+            votes.append(("MA-cross bearish", -w))
+    rs = str(c.get("rangeSignal") or "").upper()
+    if rs == "BUY":
+        votes.append(("range BUY", 0.5))
+    elif rs == "SELL":
+        votes.append(("range SELL", -0.5))
+    adv = c.get("advisor") or {}
+    price = c.get("currPrice")
+    if price not in (None, "", 0) and adv.get("buy") and adv.get("sell"):
+        try:
+            if float(price) <= float(adv["buy"]):
+                votes.append(("at buy band", 0.5))
+            elif float(price) >= float(adv["sell"]):
+                votes.append(("at sell band", -0.5))
+        except (TypeError, ValueError):
+            pass
+    try:
+        bs, ss = float(c.get("buyScore") or 0), float(c.get("sellScore") or 0)
+        if bs - ss >= 0.4:
+            votes.append(("buyScore dominant", 0.5))
+        elif ss - bs >= 0.4:
+            votes.append(("sellScore dominant", -0.5))
+    except (TypeError, ValueError):
+        pass
+    score = round(sum(w for _, w in votes), 2)
+    if score >= 0.75:
+        d = "up"
+    elif score <= -0.75:
+        d = "down"
+    else:
+        d = "flat"
+    votes.sort(key=lambda kv: -abs(kv[1]))
+    basis = ", ".join(n for n, _ in votes[:3]) or "no directional field"
+    return {"dir": d, "score": score, "basis": basis}
+
+
+def _signal_lines(c: dict, name: str) -> list:
+    """The 'Run SignalBot now' block for one interval, from the snapshot fields."""
+    mr = c.get("marketResult") or {}
+    r = c.get("RSI") or {}
+    adv = c.get("advisor") or {}
+    iv = c.get("interval")
+    is15 = str(iv) == "15m"
+    lines = [f"{name:8s} {str(iv or '?'):>5}  {c.get('action', '?'):5s} "
+             f"conf={c.get('confidence')}  "
+             f"strength={round(c.get('strength') or 0, 3)} ({c.get('strengthDirection')})"]
+    gate = c.get("strengthGate60")
+    if gate:
+        lines.append(f"    trend={mr.get('trendState')} RSI={r.get('currentRSI')} · "
+                     f"entry eligible={c.get('entryEligible')}→60m:{c.get('entryEligible60')} · "
+                     f"exit eligible={c.get('exitEligible')}→60m:{c.get('exitEligible60')}")
+        lines.append(f"    60m strength gate (small-tf rule): {gate.get('note')}")
+    else:
+        lines.append(f"    trend={mr.get('trendState')} RSI={r.get('currentRSI')} · "
+                     f"entry eligible={c.get('entryEligible')} · "
+                     f"exit eligible={c.get('exitEligible')}")
+    sv = mr.get("spreadVerdict")
+    if is15 and sv:
+        lines.append(f"    SPREAD latest={_num(mr.get('latestSpread'))} "
+                     f"(was {_num(mr.get('intialSpread'))}) · verdict {sv.get('verdict')} · "
+                     f"bias {sv.get('directionBias')} chop {sv.get('chopLevel')} "
+                     f"str {sv.get('strength')} ({sv.get('bars')} bars)")
+    elif mr.get("spreadChange") is not None:
+        lines.append(f"    SPREAD latest={_num(mr.get('latestSpread'))} "
+                     f"(was {_num(mr.get('intialSpread'))}) · change "
+                     f"{mr.get('spreadChange'):+.4f} / {mr.get('spreadCount')} bars")
+    sm = c.get("spreadMA") or {}
+    if sm.get("available"):
+        lines.append(f"    MA10−MA30 diff={sm.get('diff'):+.4f} "
+                     f"({sm.get('diffPct'):+.3f}%) · {sm.get('signal')}")
+    if is15:
+        lines.append(f"    scenario: {c.get('setupScenario')}")
+        bw = c.get("bottomWatch") or {}
+        if bw.get("armed"):
+            lines.append(f"    bottom-watch: ARMED · price {_num(bw.get('price'))} "
+                         f"vs low {_num(bw.get('low'))} · strength {_num(bw.get('strength'), 2)}")
+        else:
+            lines.append(f"    bottom-watch: off (strength {_num(bw.get('strength'), 2)} "
+                         f"≥ 0.15 or price off floor)")
+    mx = c.get("maCross") or {}
+    if is15 and mx.get("verdict"):
+        lines.append(f"    macross MA20={_num(mx.get('ma20'))} MA50={_num(mx.get('ma50'))} · "
+                     f"{mx.get('verdict')} · cross {mx.get('cross')}")
+    else:
+        lines.append(f"    macross MA20={_num(mx.get('ma20'))} MA50={_num(mx.get('ma50'))} · "
+                     f"{mx.get('bias')} · cross {mx.get('cross')}")
+    lines.append(f"    range={c.get('rangeSignal')} bias={c.get('rangeBias')} · "
+                 f"stop {_num(mr.get('stopLoss'))} target {_num(mr.get('takeProfit'))}")
+    lines.append(f"    advisor buy {adv.get('buy')} sell {adv.get('sell')}")
+    return lines
+
+
+def _load_signals() -> dict:
+    latest = _load_json(SIGNAL_LATEST_JSON, {})
+    return {"latest": latest if isinstance(latest, dict) else {}}
+
+
+def _signal_for_pair(pair, sig: dict) -> dict:
+    """The pair's own lane set when it exists, else the primary (latest) one."""
+    latest = sig.get("latest") or {}
+    if pair:
+        key = str(pair).replace("/", "-").upper()
+        d = _load_json(SIGNALS_DIR / f"{key}.json", None)
+        if isinstance(d, dict) and d.get("available") and d.get("channels"):
+            return d
+        if latest.get("available") and \
+                str(latest.get("pair") or "").upper() == str(pair).upper():
+            return latest
+    return latest if latest.get("available") else {}
+
+
+def _agent_signal(a: dict, sig: dict) -> dict:
+    """The SignalBot read for the interval(s) this agent's platform is tied to."""
+    pair = (a.get("pairs") or [None])[0]
+    snap = _signal_for_pair(pair, sig)
+    if not snap or not snap.get("channels"):
+        return {"available": False,
+                "reason": "no SignalBot snapshot on file for this pair yet"}
+    chans = snap["channels"]
+    ov = a.get("policy_overrides") or {}
+    prefer = ov.get("channels") if isinstance(ov.get("channels"), list) else []
+    reads = []
+    for iv in _agent_intervals(a):
+        name, c = _pick_channel(chans, iv, prefer)
+        if not c:
+            continue
+        reads.append({
+            "interval": iv, "channel": name,
+            "action": c.get("action"), "confidence": c.get("confidence"),
+            "strength": c.get("strength"),
+            "strength_direction": c.get("strengthDirection"),
+            "range_signal": c.get("rangeSignal"),
+            "entry_eligible": c.get("entryEligible"),
+            "entry_eligible60": c.get("entryEligible60"),
+            "exit_eligible": c.get("exitEligible"),
+            "exit_eligible60": c.get("exitEligible60"),
+            "gate": c.get("strengthGate60"),
+            "lean": _signal_lean(c),
+            "lines": _signal_lines(c, name),
+        })
+    if not reads:
+        return {"available": False,
+                "reason": "the agent's interval is not in the SignalBot snapshot"}
+    # primary = the smallest interval — the entry / timing lane the arrow speaks for
+    reads.sort(key=lambda r: (_iv_min(r["interval"]) if _iv_min(r["interval"]) is not None
+                              else 9e9, r["interval"]))
+    primary = reads[0]
+    lean = primary["lean"]
+    gate = primary.get("gate") or {}
+    block = ""
+    if gate:
+        if lean["dir"] == "up" and not gate.get("buy_allowed", True):
+            block = " · entry blocked by the 60m gate"
+        elif lean["dir"] == "down" and not gate.get("sell_allowed", True):
+            block = " · exit blocked by the 60m gate"
+    summary = (f"{primary['interval']} {primary.get('action', '?')} "
+               f"conf={primary.get('confidence')} str={round(primary.get('strength') or 0, 3)} "
+               f"{primary.get('strength_direction')} · LEAN {lean['dir'].upper()}{block}")
+    return {
+        "available": True, "pair": snap.get("pair"), "exchange": snap.get("exchange"),
+        "strategy": snap.get("strategy"), "ts": snap.get("ts"), "age": _sig_ago(snap.get("ts")),
+        "intervals": [r["interval"] for r in reads],
+        "primary_interval": primary["interval"],
+        "lean": lean, "summary": summary, "reads": reads,
+    }
+
+
 def snapshot() -> dict:
     """The market as a place: account + your platforms, from blackhorse's files."""
     agents_doc = _load_json(AGENTS_JSON, {})
@@ -253,6 +543,7 @@ def snapshot() -> dict:
     loop_state = _load_json(LOOP_STATE_JSON, {})
     live = str(trading.get("mode", "")).upper() == "LIVE"
     profs = _refresh_profiles()
+    sig = _load_signals()
 
     positions = portfolio.get("positions", [])
     n = len(agents_all)
@@ -287,6 +578,7 @@ def snapshot() -> dict:
             "state": state, "position_count": len(mine),
             "net_pct": round(sum(nets) / len(nets), 2) if nets else None,
             "positions": pos_rows,
+            "signal": _agent_signal(a, sig),
             "pos": [layout[i][0], layout[i][1], layout[i][2]],
             "radius": 4.2,
         })
@@ -331,6 +623,7 @@ def snapshot() -> dict:
         ("portfolio.json", _text(PORTFOLIO_JSON)),
         ("exit_watch.json", _text(EXIT_WATCH_JSON)),
         ("loop_state.json", _text(LOOP_STATE_JSON)),
+        ("signal_latest.json", _text(SIGNAL_LATEST_JSON)),
     ]
     fp = _fingerprint(*inputs)
 
@@ -368,6 +661,8 @@ def _sources() -> list:
          "the exit manager watches it"),
         ("loop_state \u00b7 the heartbeat", LOOP_STATE_JSON,
          "the loop writes it each pass"),
+        ("signal \u00b7 the bot's read", SIGNAL_LATEST_JSON,
+         "run SignalBot in the blackhorse GUI, or let the loop run a pass"),
     ]
     out = []
     for name, p, hint in feeds:
@@ -392,11 +687,15 @@ def _honesty() -> dict:
             "open positions from logs/portfolio.json and logs/exit_watch.json",
             "your balance from config/treasury.json (cash, allocated, holdings)",
             "the loop's own heartbeat and decision from logs/loop_state.json",
+            "each platform's interval read (action, strength, RSI, spread, MA cross, "
+            "and the 60m strength gate) from the SignalBot's own snapshot",
             "other users' characters, relayed live by the presence server",
         ],
         "feels": [
             "the market floor, the columns and the platforms are dressing",
             "green / red / amber are a read of the files above, not a source",
+            "the up/down arrow is the SignalBot's LEAN over its own named fields "
+            "\u2014 not a promise and not an order",
             "the crowd is the relay's users; nobody is invented",
         ],
         "note": ("This floor is a MEMORY model of blackhorse's own files, like the wire. "
@@ -561,13 +860,21 @@ class Presence:
 
     def __init__(self, addr=("127.0.0.1", 17833), base_url=None, user=None):
         self.addr = addr
-        self._base = (base_url or f"http://127.0.0.1:{addr[1]}").rstrip("/")
+        self.tls = wiretls.enabled()
+        if base_url:
+            self._base = base_url.rstrip("/")
+        else:
+            scheme = "https" if self.tls else "http"
+            self._base = f"{scheme}://127.0.0.1:{addr[1]}"
         self.user = (user or os.environ.get("MRFLUFFY_WIRE_USER")
                      or socket.gethostname() or "wire").replace(" ", "_")
         self.key = _ghost_key()
         self.ghost = self.key is not None
         self.tok = secrets.token_hex(16)      # our random ghost-id for this session
         self.ward = 0                         # times the relay's ward turned us away
+        self._server_ctx = wiretls.server_context() if self.tls else None
+        self._cli_ctx, self._tls_info = (
+            wiretls.client_context() if self._base.startswith("https") else (None, {}))
         self._peers: dict = {}
         self._tok: dict = {}                  # name -> bound ghost-id
         self._rate: dict = {}                 # ip -> (window, count)
@@ -578,12 +885,22 @@ class Presence:
         self.started = False
         self._online = None
 
+    def _urlopen(self, target, timeout=1.0):
+        """urlopen on our pinned TLS context when the relay is https."""
+        if self._cli_ctx is not None:
+            return urllib.request.urlopen(target, timeout=timeout,
+                                          context=self._cli_ctx)
+        return urllib.request.urlopen(target, timeout=timeout)
+
     def start(self) -> None:
         if self.started:
             return
         try:
-            srv = ThreadingHTTPServer(self.addr, _Handler)
+            srv = _PresenceServer(self.addr, _Handler)
             srv.presence = self
+            srv.ssl_ctx = self._server_ctx
+            if srv.ssl_ctx is not None:
+                srv.socket = srv.ssl_ctx.wrap_socket(srv.socket, server_side=True)
             self._server = srv
             self._thread = threading.Thread(target=srv.serve_forever, daemon=True)
             self._thread.start()
@@ -629,7 +946,7 @@ class Presence:
 
     def _ping(self) -> bool:
         try:
-            with urllib.request.urlopen(self._base + "/ping", timeout=1.0):
+            with self._urlopen(self._base + "/ping", timeout=1.0):
                 pass
             return True
         except Exception:
@@ -656,7 +973,7 @@ class Presence:
                 data=self._seal({"name": self.user, "tok": self.tok,
                                  "pose": pose}),
                 headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=1.0) as r:
+            with self._urlopen(req, timeout=1.0) as r:
                 got = json.loads(r.read() or b"{}")
                 self.ward = int(got.get("ward", 0) or 0)
             self._online = True
@@ -671,7 +988,7 @@ class Presence:
                 self._base + "/leave", method="POST",
                 data=self._seal({"name": self.user, "tok": self.tok}),
                 headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=1.0):
+            with self._urlopen(req, timeout=1.0):
                 pass
         except Exception:
             pass
@@ -679,7 +996,7 @@ class Presence:
     def peers(self) -> list:
         """Other users' characters in the market, pulled from the relay."""
         try:
-            with urllib.request.urlopen(self._base + "/peers", timeout=1.0) as r:
+            with self._urlopen(self._base + "/peers", timeout=1.0) as r:
                 doc = json.loads(r.read() or b"{}")
             data = self._unwrap(doc)
             if data is None:
@@ -690,11 +1007,31 @@ class Presence:
             return []
 
     def describe(self) -> str:
-        if self.ghost:
-            return (f"ghost layer: hardened \u00b7 payloads encrypted + signed "
-                    f"(PBKDF2\u2192HMAC weave) \u00b7 ward refused {self.ward} attempt(s)")
-        return ("ghost layer: open \u00b7 set MRFLUFFY_WIRE_KEY on the relay and "
-                "every player to seal the floor")
+        if self.tls and self._server_ctx is not None:
+            line = wiretls.describe()
+        elif self.tls:
+            line = "tls: wanted \u00b7 cert could not be built (openssl/cryptography missing)"
+        else:
+            line = "tls: off \u00b7 plain HTTP floor"
+        if self.key:
+            line += " \u00b7 ghost: signed (shared key)"
+        elif self.tls:
+            line += " \u00b7 ghost: open (traffic still sealed by TLS)"
+        else:
+            line += (" \u00b7 ghost: open \u00b7 set MRFLUFFY_WIRE_KEY on the relay "
+                     "and every player to sign the floor")
+        return line + f" \u00b7 ward refused {self.ward} attempt(s)"
+
+
+class _PresenceServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that keeps a TLS context and swallows handshake noise."""
+    daemon_threads = True
+    allow_reuse_address = True
+    ssl_ctx = None
+
+    def handle_error(self, request, client_address):
+        # a bad handshake or a rude client is not the relay's problem — ignore it
+        pass
 
 
 RATE_WINDOW = 10.0        # seconds
@@ -704,6 +1041,10 @@ MAX_POSE_BYTES = 4096     # reject oversized shells
 MAX_PEERS = 64            # the floor holds a bounded crowd
 
 class _Handler(BaseHTTPRequestHandler):
+    def setup(self):
+        """The server's listening socket is wrapped for TLS; do not re-wrap."""
+        super().setup()
+
     def log_message(self, *a):
         pass
 
@@ -921,8 +1262,13 @@ if __name__ == "__main__":
                      "is another relay already running?")
         print(f"wiregate presence relay on {pr.addr} (user {pr.user})")
         print(pr.describe())
-        print("players join with MRFLUFFY_GATE_URL=http://<this-host>:PORT "
+        scheme = "https" if (pr.tls and pr._server_ctx is not None) else "http"
+        print(f"players join with MRFLUFFY_GATE_URL={scheme}://<this-host>:PORT "
               "plus MRFLUFFY_WIRE_KEY (same phrase, relay + players)")
+        if scheme == "https":
+            print(f"a player on another host must also pin the relay cert: "
+                  f"MRFLUFFY_WIRE_CA={wiretls.CERT_PEM}  (sha256 "
+                  f"{wiretls.fingerprint()})")
         print("Ctrl-C to stop")
         try:
             while True:

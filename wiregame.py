@@ -17,9 +17,9 @@ default; the real term is one keypress away ('T'), so nobody is left behind.
 Standalone:  python3 wiregame.py
 """
 from __future__ import annotations
-import math, os, random, sys, time, hashlib, html, re
+import math, os, random, sys, time, hashlib, html, re, collections, threading
 
-from PyQt6.QtCore import Qt, QRect, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, pyqtSignal
 from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QPainter, QPen, QSurfaceFormat,
                          QCursor, QRadialGradient, QShortcut, QKeySequence)
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
@@ -35,8 +35,12 @@ from OpenGL.GLU import *
 import wirevision
 import wiregate
 import wirenet
+import machinevision
+import birdguard
+import wiresettings
 import quran
 import quranworld
+import candlevision
 from wiregate import MARKET_FLOOR_Y, MARKET_R, RETURN_GATE_POS
 
 MARKET_GATE_POS = [23.0, 0.06, 0.0]   # the tall portal to BlackHorse — its own cleared plaza, due +x
@@ -88,6 +92,36 @@ EXCHANGE_GATES = (
      "blurb": "the web, searched \u2014 real results, served here"},
 )
 
+# the MACHINE — the box under your feet, entered by a hatch on the wire floor
+# due +z (the one free plaza wedge). LOCAL only: doors (listening sockets),
+# roads (live connections), inhabitants (the processes holding them), and dark
+# figures (intruders) drawn only from local defensive evidence. It never touches
+# the net: everything here is read from /proc and raven's own logs (machinevision).
+MACHINE_HATCH_POS = [0.0, 0.06, 23.0]     # the hatch, due +z
+MACHINE_FLOOR_Y = -160.0                  # the machine sits below the Exchange
+MACHINE_R = 30.0
+MACHINE_DOOR_R = 15.0                     # the ring of doors (ways in)
+MACHINE_WALL_R = 20.0                     # the shell's wall, between doors and figures
+MACHINE_FIGURE_R = 25.0                   # dark figures stand in the field outside
+MACHINE_RETURN_POS = [0.0, MACHINE_FLOOR_Y + 6.0, MACHINE_R - 7.0]  # up to the wire
+MACHINE_COL = (0.35, 0.92, 0.58)          # terminal green — a machine readout
+MACHINE_BIRD_R = 9.0                      # the birds circle the core
+MACHINE_BIRD_Y = MACHINE_FLOOR_Y + 9.0
+MACHINE_BIRD_NEAR = 5.5                   # close enough to speak to a bird
+BIRD_COL = {"crow": (0.80, 0.82, 0.90), "finch": (0.45, 0.95, 0.85),
+            "raven": (0.72, 0.62, 1.00)}
+
+# the CANDLE ROOM — DOT/USD's tape read as a place, entered from the market's
+# centre column. LOCAL files only (the candle dump + SignalBot's OWN saved rows),
+# joined by bar index: it never runs the bot, never fetches, never invents a bar
+# (see candlevision.py). One interval is chosen at the door; the room is a walk
+# down the tape, one tower per candle, the newest glowing as it ticks.
+CANDLES_FLOOR_Y = candlevision.FLOOR_Y
+CANDLE_UP = candlevision.UP
+CANDLE_DOWN = candlevision.DOWN
+CANDLE_AMBER = candlevision.AMBER
+CANDLE_GREY = candlevision.GREY
+
 # index: 0 floor, 1..5 = protocol strata (top -> bottom)
 STRATA_Y = [0.0, -10.0, -20.0, -30.0, -40.0, -50.0]
 STRATA_KEY = ["floor", "app", "transport", "internet", "link", "physical"]
@@ -107,6 +141,17 @@ MARKET_STATE_TXT = {
     "buy": "waiting to buy", "sell": "waiting to sell",
     "selling": "selling now", "off": "off",
 }
+# the SignalBot's LEAN — which way its own named fields point (green up / red down)
+MARKET_LEAN_COL = {
+    "up": (0.26, 0.96, 0.44),
+    "down": (0.97, 0.28, 0.30),
+    "flat": (0.98, 0.76, 0.22),
+    "none": (0.46, 0.49, 0.56),
+}
+MARKET_LEAN_TXT = {"up": "LEAN UP", "down": "LEAN DOWN",
+                   "flat": "FLAT", "none": "NO SIGNAL"}
+MARKET_LEAN_GLYPH = {"up": "\u25b2", "down": "\u25bc",
+                     "flat": "\u25ac", "none": "\u00b7"}
 
 PAL = {
     "floor":     {"sky": (0.02, 0.07, 0.09), "a": (0.06, 0.16, 0.18), "b": (0.04, 0.11, 0.13), "accent": (0.98, 0.72, 0.22), "hill": (0.03, 0.09, 0.11)},
@@ -152,10 +197,14 @@ class _GLDeck(QWidget):
 
     def add_panel(self, panel):
         self.panel = panel
-        panel.setParent(self)
+        # parent to the GL widget so it is part of the GL composition tree and
+        # appears at once when shown (siblings only compose on a resize)
+        panel.setParent(self.glw if self.glw is not None else self)
 
     def add_overlay(self, widget, anchor="bottom-center"):
-        widget.setParent(self)
+        # children of the QOpenGLWidget compose on top of it every frame; a mere
+        # sibling only appears the next time the window is resized.
+        widget.setParent(self.glw if self.glw is not None else self)
         self.overlays.append((widget, anchor))
 
     def place_panel(self):
@@ -173,10 +222,14 @@ class _GLDeck(QWidget):
             sw, sh = ov.sizeHint().width(), ov.sizeHint().height()
             if anchor == "top-center":
                 x, y = (w - sw) // 2, 12
+            elif anchor == "top-left":
+                x, y = 14, 14
             elif anchor == "top-right":
                 x, y = w - sw - 14, 14
             elif anchor == "bottom-right":
                 x, y = w - sw - 14, h - sh - 16
+            elif anchor == "center":
+                x, y = (w - sw) // 2, max(12, (h - sh) // 2)
             else:                                   # bottom-center
                 x, y = (w - sw) // 2, h - sh - 16
             ov.setGeometry(x, y, sw, sh)
@@ -187,6 +240,134 @@ class _GLDeck(QWidget):
             self.glw.setGeometry(self.rect())
         self.place_panel()
         self.place_overlays()
+
+
+class _GameMenu(QFrame):
+    """The pause/popup menu, floating over the world. Esc or Tab closes it;
+    while it is open it holds the keyboard, so the world does not also move."""
+
+    escape = pyqtSignal()
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key.Key_Escape, Qt.Key.Key_Tab):
+            self.escape.emit()
+            return
+        super().keyPressEvent(e)
+
+
+def _clampf(v, lo, hi, fallback):
+    try:
+        return max(lo, min(hi, float(v)))
+    except Exception:
+        return fallback
+
+
+def _hbytes(n):
+    """A plain, honest byte size — used only to label a number we actually read."""
+    n = float(n or 0)
+    for u in ("B", "KB", "MB", "GB"):
+        if n < 1024 or u == "GB":
+            return f"{n:.0f}{u}" if u == "B" else f"{n:.1f}{u}"
+        n /= 1024
+
+
+class _PacketReader:
+    """A bounded, read-only packet capture streamed into the room (heavy mode).
+
+    Runs ONE `tshark` on the named interface, line-buffered, and keeps only the
+    newest MAXQ packets as small dicts. It captures only — it never sends a
+    packet, and it is the single place (with the knob at `capture`) that does
+    real capture work. If it cannot start (no tshark, no permission), it reports
+    why and the room falls back to the cheap delta mode.
+    """
+    MAXQ = 600
+
+    def __init__(self, iface="any", max_pps=400):
+        self.iface = iface or "any"
+        self.max_pps = max_pps
+        self.packets = collections.deque(maxlen=self.MAXQ)
+        self.error = None
+        self._stop = False
+        self._proc = None
+        self._thread = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _cmd(self):
+        return ["tshark", "-i", self.iface, "-l", "-n", "-Q", "-T", "fields",
+                "-e", "frame.time_epoch", "-e", "ip.src", "-e", "ip.dst",
+                "-e", "_ws.col.Protocol", "-e", "frame.len",
+                "-e", "tcp.srcport", "-e", "tcp.dstport",
+                "-e", "udp.srcport", "-e", "udp.dstport"]
+
+    def _run(self):
+        import subprocess
+        last = None
+        for cmd in (["sudo", "-n"] + self._cmd(), self._cmd()):
+            if self._stop:
+                return
+            try:
+                self._proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    text=True, bufsize=1)
+            except FileNotFoundError:
+                self.error = "tshark not found"
+                return
+            except Exception as e:
+                last = str(e)
+                continue
+            if self._pump() == 0 and not self._stop:
+                last = f"could not capture on {self.iface}"
+                continue
+            return
+        self.error = last or "capture unavailable"
+
+    def _pump(self):
+        n = 0
+        try:
+            for line in self._proc.stdout:
+                if self._stop:
+                    break
+                p = self.parse(line)
+                if p:
+                    self.packets.append(p)
+                    n += 1
+        except Exception:
+            pass
+        try:
+            self._proc.wait(timeout=3)
+        except Exception:
+            pass
+        return n
+
+    @staticmethod
+    def parse(line):
+        f = line.rstrip("\n").split("\t")
+        if len(f) < 5:
+            return None
+        try:
+            ts = float(f[0])
+        except Exception:
+            ts = time.time()
+        try:
+            ln = int(f[4])
+        except Exception:
+            ln = 0
+        sport = f[5] if len(f) > 5 and f[5] else (f[7] if len(f) > 7 else "")
+        dport = f[6] if len(f) > 6 and f[6] else (f[8] if len(f) > 8 else "")
+        return {"ts": ts, "src": f[1], "dst": f[2], "proto": f[3] or "?",
+                "len": ln, "sport": sport, "dport": dport}
+
+    def stop(self):
+        self._stop = True
+        try:
+            if self._proc:
+                self._proc.terminate()
+        except Exception:
+            pass
+
 
 class WireGLWidget(QOpenGLWidget):
     stratum_changed = pyqtSignal(int, str)     # index, focus label (may be "")
@@ -199,6 +380,10 @@ class WireGLWidget(QOpenGLWidget):
     escape_request = pyqtSignal()              # Esc — leave full screen (the tab decides)
     word_changed = pyqtSignal()                # entered/left the Word room, or moved ayah
     web_changed = pyqtSignal()                 # entered/left the Exchange, or a gate
+    machine_changed = pyqtSignal()             # entered/left the machine room
+    candles_changed = pyqtSignal()             # entered/left the candle room
+    live_changed = pyqtSignal(str, str)        # live mode, effective mode
+    menu_request = pyqtSignal()                # Tab — the tab opens the game menu
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -210,8 +395,15 @@ class WireGLWidget(QOpenGLWidget):
         self.keys = set()
         self._drag = False
         self._last_xy = None
+        self._looklocked = False    # mouse captured: move to look, click to grab
         self.focus = ""
         self.show_real = False
+        self.move_mult = 1.9        # fly speed multiplier (the game knob)
+        self.walk_mult = 1.0        # walk speed multiplier (the game knob)
+        self.boost_mult = 2.2       # sprint / boost multiplier while Shift is held
+        self.look_sens = 1.0        # mouse-look sensitivity (the game knob)
+        self._speed_now = 0.0       # the speed you are actually carrying (units/s)
+        self._speedlines = []       # streaking motion lines, built once
         self.transition = None
         self.deep = None            # the open sea below the edge: unbounded, no data
         self.flying = False         # free flight through the wire (G toggles)
@@ -265,6 +457,33 @@ class WireGLWidget(QOpenGLWidget):
         self._pkt_t = 0.0
         self.web_tabs = []               # result-tablets you fly to
         self.web_mono = None             # the page, assembled as light
+        # the machine — the box under your feet, entered by a hatch on the wire
+        self.machine = False
+        self.machine_world = None        # machinevision.build() — this host, live
+        self.machine_xray = False        # see through the wall to a door a figure touched
+        self.machine_birds_armed = False  # finch's hand is live (behind an explicit arm)
+        self._machine_arm_until = 0.0
+        self._machine_contain_confirm = None   # (ip, deadline) — the second E
+        self._machine_release_until = 0.0
+        self._machine_contained = {}     # ip -> {reason, at}, mirrored from birdguard
+        self.machine_autoguard = False   # Phase 3: finch detects + contains on its own
+        self._machine_auto_until = 0.0
+        self._auto_attempts = {}         # ip -> last-attempt time (cooldown for refusals)
+        # the candle room — DOT/USD's tape as a place, entered from the market column
+        self.candles = False
+        self.candles_world = None
+        self.candles_select = False      # the interval chooser at the door
+        self.candles_ivs = []            # the chooser's options
+        self.candles_sel = None          # the bar whose panel is open
+        self._candle_stars = None        # lazily-built decorative star field
+        # live vision (the knob): off / delta / capture, or auto-detected
+        self.live_mode = "auto"
+        self.live_effective = "off"
+        self._live_info = None           # the auto-detect read
+        self._live = {}                  # newest real rates (delta mode)
+        self._live_prev = None           # previous counter snapshot
+        self._live_t = 0.0
+        self._capture = None             # the packet-capture reader, when running
         self._last_t = time.time()
         self._hud_msg = ""
         self._hud_until = 0.0
@@ -273,9 +492,35 @@ class WireGLWidget(QOpenGLWidget):
         self._quad = gluNewQuadric()
         self._glyphs = []
         self._init_glyphs()
+        self._init_speedlines()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.update)
         self._timer.start(16)
+        self._auto_timer = QTimer(self)          # the auto-defend heartbeat
+        self._auto_timer.timeout.connect(self._machine_autoguard_beat)
+        self._auto_timer.start(3000)
+        self._live_timer = QTimer(self)      # the live-vision sampler (delta mode)
+        self._live_timer.timeout.connect(self._live_sample)
+        self._apply_saved_live_mode()
+        self.reload_game_settings()
+
+    def reload_game_settings(self):
+        """Read the player's own knobs (walk speed, fly speed, boost, look
+        sensitivity) from wiresettings. Purely a preference — it changes nothing
+        about the world."""
+        try:
+            st = wiresettings.load()
+        except Exception:
+            st = {}
+        self.move_mult = _clampf(st.get("fly_speed"), 0.5, 4.0, 1.9)
+        self.walk_mult = _clampf(st.get("walk_speed"), 0.5, 3.0, 1.0)
+        self.boost_mult = _clampf(st.get("boost_mult"), 1.0, 6.0, 2.2)
+        self.look_sens = _clampf(st.get("look_sensitivity"), 0.2, 3.0, 1.0)
+
+    def _boost(self):
+        """The speed boost you get while Shift is held — sprint on foot, burn in
+        flight. One knob; the player owns it."""
+        return self.boost_mult if Qt.Key.Key_Shift in self.keys else 1.0
 
     def _init_glyphs(self):
         """Deterministic columns of falling code — the sea of information.
@@ -301,6 +546,22 @@ class WireGLWidget(QOpenGLWidget):
             r = 2.0 + rnd2.random() * 24.0
             self._motes.append((r * math.cos(a), r * math.sin(a),
                                 rnd2.random() * 60.0, 4.0 + rnd2.random() * 12.0))
+
+    def _init_speedlines(self):
+        """The streaks that fly past when you are moving fast. Built once, with a
+        fixed seed, so the same line always streaks from the same direction — the
+        only thing that changes is how hard you are going. Atmosphere, nothing
+        more: it carries no data and is tied to the speed you actually measure."""
+        rnd = random.Random(1995 + 31)
+        lines = []
+        for _ in range(96):
+            a = rnd.random() * 2 * math.pi
+            rate = 0.8 + rnd.random() * 1.9      # how fast it flies outward
+            ln = 0.10 + rnd.random() * 0.26      # length, as a fraction of the radius
+            ph = rnd.random()                    # starting phase, 0..1
+            w = 1.0 + rnd.random() * 1.7
+            lines.append((a, rate, ln, ph, w))
+        self._speedlines = lines
 
     def _rain_level(self):
         """How thick the sea is right now: 1.0 on the floor, deeper with each
@@ -351,6 +612,22 @@ class WireGLWidget(QOpenGLWidget):
         self._pkt_t = 0.0
         self.web_tabs = []
         self.web_mono = None
+        self.machine = False
+        self.machine_world = None
+        self.machine_xray = False
+        self.machine_birds_armed = False
+        self._machine_arm_until = 0.0
+        self._machine_contain_confirm = None
+        self._machine_release_until = 0.0
+        self._machine_contained = {}
+        self.machine_autoguard = False
+        self._machine_auto_until = 0.0
+        self._auto_attempts = {}
+        self.candles = False
+        self.candles_world = None
+        self.candles_select = False
+        self.candles_ivs = []
+        self.candles_sel = None
         self.pos = [0.0, EYE, 10.0]
         self.yaw = 0.0
         self.pitch = -0.05
@@ -567,6 +844,25 @@ class WireGLWidget(QOpenGLWidget):
             glVertex3f(x + r * math.cos(a1), y, z + r * math.sin(a1))
         glEnd()
 
+    def _arrow_head(self, x, y, z, r, h, c, up=True):
+        """A solid arrowhead: apex points up (or down), base cap closed."""
+        glColor3f(*c)
+        seg = 8
+        apex = y + (h if up else -h)
+        glBegin(GL_TRIANGLES)
+        for i in range(seg):
+            a0 = 2 * math.pi * i / seg
+            a1 = 2 * math.pi * (i + 1) / seg
+            glVertex3f(x, apex, z)
+            glVertex3f(x + r * math.cos(a0), y, z + r * math.sin(a0))
+            glVertex3f(x + r * math.cos(a1), y, z + r * math.sin(a1))
+        glEnd()
+        glBegin(GL_POLYGON)
+        for i in range(seg):
+            a = 2 * math.pi * i / seg
+            glVertex3f(x + r * math.cos(a), y, z + r * math.sin(a))
+        glEnd()
+
     def _portal(self, x, z, y, radius, c, t):
         pulse = 1.0 + 0.12 * math.sin(t * 3.0)
         rr = radius * pulse
@@ -584,6 +880,28 @@ class WireGLWidget(QOpenGLWidget):
         for i in range(seg):
             a = 2 * math.pi * i / seg
             glVertex3f(x + rr * math.cos(a), y + radius + rr * math.sin(a), z)
+        glEnd()
+        glLineWidth(1.0)
+
+    def _vring(self, x, y, z, radius, c, t):
+        """A ring standing upright in the Y-Z plane at a fixed x — a doorway seen
+        head-on when you look down the candle tape (the flat _portal won't do)."""
+        pulse = 1.0 + 0.10 * math.sin(t * 3.0)
+        rr = radius * pulse
+        seg = 22
+        glColor4f(c[0], c[1], c[2], 0.30)
+        glBegin(GL_TRIANGLE_FAN)
+        glVertex3f(x, y, z)
+        for i in range(seg + 1):
+            a = 2 * math.pi * i / seg
+            glVertex3f(x, y + rr * math.cos(a), z + rr * math.sin(a))
+        glEnd()
+        glLineWidth(3.0)
+        glColor4f(c[0], c[1], c[2], 0.95)
+        glBegin(GL_LINE_LOOP)
+        for i in range(seg):
+            a = 2 * math.pi * i / seg
+            glVertex3f(x, y + rr * math.cos(a), z + rr * math.sin(a))
         glEnd()
         glLineWidth(1.0)
 
@@ -657,6 +975,41 @@ class WireGLWidget(QOpenGLWidget):
         self._draw_word_gate(t, y)
         # the OUTWARD GATE — a pier over the open sea; the one place the wire is real
         self._draw_net_gate(t, y)
+        # the machine hatch — the box under your feet, its own wedge due +z
+        self._machine_hatch(t, y)
+
+    def _machine_hatch(self, t, y):
+        """The hatch down into THIS machine: a lit hex rim on the floor with a
+        dark shaft pulsing beneath — the way down, standing apart from the crowd.
+        Dressing only; the room itself is read live from /proc."""
+        hx, hy, hz = MACHINE_HATCH_POS
+        r = 3.4
+        glColor4f(0.02, 0.06, 0.045, 0.9)
+        glBegin(GL_TRIANGLE_FAN)
+        glVertex3f(hx, y + 0.045, hz)
+        for i in range(7):
+            a = 2 * math.pi * i / 6
+            glVertex3f(hx + r * math.cos(a), y + 0.05, hz + r * math.sin(a))
+        glEnd()
+        glColor4f(0.20, 0.55, 0.34, 0.55)
+        glLineWidth(2.0)
+        glBegin(GL_LINE_LOOP)
+        for i in range(6):
+            a = 2 * math.pi * i / 6
+            glVertex3f(hx + r * math.cos(a), y + 0.06, hz + r * math.sin(a))
+        glEnd()
+        self._portal(hx, hz, y + 0.2, 2.2, (0.35, 0.92, 0.58), t + 0.8)
+        for k in range(3):
+            glColor4f(0.30, 0.85, 0.52, 0.35 - 0.08 * k)
+            glLineWidth(1.5)
+            glBegin(GL_LINE_LOOP)
+            aa = t * 0.5 + k * 0.5
+            for i in range(24):
+                a = 2 * math.pi * i / 24 + aa
+                glVertex3f(hx + (1.2 + 0.6 * k) * math.cos(a), y + 0.07,
+                           hz + (1.2 + 0.6 * k) * math.sin(a))
+            glEnd()
+        glLineWidth(1.0)
 
     def _market_apron(self, t, y):
         """Blackhorse's own arrival pad on the wire floor: a dark violet plaza
@@ -918,6 +1271,8 @@ class WireGLWidget(QOpenGLWidget):
     def _labels(self):
         """Screen-space labels for the active scene. Returns list of (sx,sy,txt,color)."""
         out = []
+        if self.machine:
+            return self._machine_labels()
         if self.market:
             return self._market_labels()
         if not self.world:
@@ -987,6 +1342,11 @@ class WireGLWidget(QOpenGLWidget):
                           "LEARN ISLAM \u2014 the room of the Word [E] \u00b7 "
                           "the Qur'an read in the wire, words on light",
                           (0.72, 0.90, 1.0)))
+            hx, hy, hz = MACHINE_HATCH_POS
+            items.append((hx, y + 4.4, hz,
+                          "THE MACHINE \u2014 down into this host [E] \u00b7 "
+                          "the box under your feet, read live",
+                          (0.62, 1.0, 0.72)))
         else:
             st = self.world["strata"][self.active - 1]
             for a in st["artifacts"]:
@@ -1019,8 +1379,25 @@ class WireGLWidget(QOpenGLWidget):
                     or self.web_mono is not None or self._at_console()):
                 self._web_key(e)
                 return
+        if self.candles_select:
+            # the interval chooser at the candle room's door: number keys pick,
+            # Esc cancels. Movement is held while you choose.
+            if k == Qt.Key.Key_Escape:
+                self.candles_select = False
+                self.candles_ivs = []
+                self._flash("candle room \u2014 cancelled")
+            elif Qt.Key.Key_1 <= k <= Qt.Key.Key_9:
+                i = k - Qt.Key.Key_1
+                if 0 <= i < len(self.candles_ivs):
+                    self._enter_candles(self.candles_ivs[i]["interval"])
+            super().keyPressEvent(e)
+            return
         if k == Qt.Key.Key_Escape:
             self._drag = False
+            if self._looklocked:
+                self.set_look_lock(False)      # free the mouse first; press again to leave full screen
+                super().keyPressEvent(e)
+                return
             self.setCursor(Qt.CursorShape.ArrowCursor)
             self.escape_request.emit()       # the tab drops full screen if it is on
             if self.market and self.selected_agent:
@@ -1033,10 +1410,31 @@ class WireGLWidget(QOpenGLWidget):
             else:
                 self._interact()
         elif k == Qt.Key.Key_B:
-            if self.market:
+            if self.candles:
+                self.refresh_candles()
+            elif self.machine:
+                self.refresh_machine()
+            elif self.market:
                 self.refresh_market()
             elif not self.word:
                 self.request_rebuild.emit()
+        elif k == Qt.Key.Key_X:
+            if self.machine:
+                self.machine_xray = not self.machine_xray
+                if self.machine_xray:
+                    self._flash("x-ray on \u2014 see through the shell's wall to the "
+                                "door a dark figure has touched")
+                else:
+                    self._flash("x-ray off")
+        elif k == Qt.Key.Key_K:
+            if self.machine:
+                self._machine_arm_toggle()
+        elif k == Qt.Key.Key_L:
+            if self.machine:
+                self._machine_release_toggle()
+        elif k == Qt.Key.Key_M:
+            if self.machine:
+                self._machine_autoguard_toggle()
         elif k == Qt.Key.Key_BracketLeft:
             self._word_move(-1)
         elif k == Qt.Key.Key_BracketRight:
@@ -1052,18 +1450,24 @@ class WireGLWidget(QOpenGLWidget):
         elif k == Qt.Key.Key_H:
             self.menu_toggle.emit(True)
         elif k == Qt.Key.Key_Home:
-            if self.market:
+            if self.candles:
+                self._leave_candles()
+            elif self.market:
                 self._leave_market()
             elif self.word:
                 self._leave_word()
             elif self.exchange:
                 self._leave_exchange()
+            elif self.machine:
+                self._leave_machine()
             elif self.deep is not None:
                 self._exit_deep(surface=True)
             else:
                 self._go_surface()
         elif k == Qt.Key.Key_G:
             self._toggle_fly()
+        elif k == Qt.Key.Key_Tab:
+            self.menu_request.emit()          # open the game menu (Tab toggles)
         elif k == Qt.Key.Key_F11:
             self.fullscreen_request.emit()
         else:
@@ -1074,34 +1478,85 @@ class WireGLWidget(QOpenGLWidget):
         self.keys.discard(e.key())
         super().keyReleaseEvent(e)
 
+    def focusNextPrevChild(self, _next):
+        # Tab opens the game menu — it must never be swallowed by focus travel.
+        return False
+
     def wheelEvent(self, e):
         # the wheel no longer travels the ayah — use the next/prev buttons, the
         # [ ] keys, or the gates. Scrolling stays out of the reading.
         super().wheelEvent(e)
 
+    def _look_center(self):
+        c = self.mapToGlobal(QPoint(self.width() // 2, self.height() // 2))
+        QCursor.setPos(c)
+        self._last_xy = QPoint(self.width() // 2, self.height() // 2)
+
+    def set_look_lock(self, on):
+        """Capture the mouse (hide + pin it to the middle) so moving the mouse
+        turns the view smoothly in any direction while you keep walking or
+        flying — no need to stop, no edge to run into. Esc or right-click frees
+        it again so you can reach the panels."""
+        on = bool(on)
+        if on == self._looklocked:
+            return
+        self._looklocked = on
+        if on:
+            self._drag = False
+            self.setCursor(Qt.CursorShape.BlankCursor)
+            self.setMouseTracking(True)
+            self._look_center()
+        else:
+            self.unsetCursor()
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def focusOutEvent(self, e):
+        if self._looklocked:
+            self.set_look_lock(False)
+        super().focusOutEvent(e)
+
     def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            self._drag = True
-            self._last_xy = e.position().toPoint()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
         self.setFocus()
+        if e.button() == Qt.MouseButton.RightButton:
+            if self._looklocked:
+                self.set_look_lock(False)      # release the mouse back to the panels
+            return
+        if e.button() == Qt.MouseButton.LeftButton:
+            if not self._looklocked:
+                self.set_look_lock(True)       # click the world to grab the mouse
+            else:
+                self._drag = True              # (fallback) legacy drag while locked
+                self._last_xy = e.position().toPoint()
 
     def mouseReleaseEvent(self, e):
         self._drag = False
-        self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def mouseMoveEvent(self, e):
-        if self._drag and self._last_xy is not None:
+        if self._looklocked:
+            p = e.position().toPoint()
+            cx, cy = self.width() // 2, self.height() // 2
+            dx, dy = p.x() - cx, p.y() - cy
+            if dx or dy:
+                s = 0.004 * self.look_sens
+                self.yaw += dx * s
+                self.pitch = max(-1.35, min(1.35, self.pitch - dy * s))
+                self._look_center()
+        elif self._drag and self._last_xy is not None:
             p = e.position().toPoint()
             dx = p.x() - self._last_xy.x()
             dy = p.y() - self._last_xy.y()
-            self.yaw += dx * 0.004
-            self.pitch = max(-1.2, min(1.2, self.pitch - dy * 0.004))
+            s = 0.004 * self.look_sens
+            self.yaw += dx * s
+            self.pitch = max(-1.2, min(1.2, self.pitch - dy * s))
             self._last_xy = p
 
     # ---- movement + interaction -------------------------------------------
     def _step(self, dt):
         self._net_tick()
+        self._speed_now = 0.0
+        if self.candles:
+            self._candles_step(dt)
+            return
         if self.exchange:
             if self.service is None or not self._at_console():
                 self._exchange_step(dt)
@@ -1113,6 +1568,9 @@ class WireGLWidget(QOpenGLWidget):
             return
         if self.word:
             self._word_step(dt)
+            return
+        if self.machine:
+            self._machine_step(dt)
             return
         if self.deep is not None:
             d = self.deep
@@ -1158,8 +1616,8 @@ class WireGLWidget(QOpenGLWidget):
                 self.pitch = -0.05
             return
         k = self.keys
-        fast = 2.2 if (Qt.Key.Key_Shift in k) else 1.0
-        spd = 9.0 * fast * dt
+        fast = self._boost()
+        spd = 9.0 * self.walk_mult * fast * dt
         yaw_spd = 1.8 * dt
         if Qt.Key.Key_Left in k or Qt.Key.Key_Q in k:
             self.yaw -= yaw_spd
@@ -1185,6 +1643,7 @@ class WireGLWidget(QOpenGLWidget):
             dx += rx; dz += rz
         m = math.hypot(dx, dz)
         if m > 0:
+            self._speed_now = 9.0 * self.walk_mult * fast
             dx, dz = dx / m * spd, dz / m * spd
             nx, nz = self.pos[0] + dx, self.pos[2] + dz
             rr = math.hypot(nx, nz)
@@ -1204,7 +1663,8 @@ class WireGLWidget(QOpenGLWidget):
 
     # ---- flight: move freely through the wire (G) -------------------------
     def _toggle_fly(self):
-        if self.deep is not None or self.transition is not None:
+        if self.deep is not None or self.transition is not None or self.machine \
+                or self.candles:
             return
         self.flying = not self.flying
         if not self.flying:
@@ -1215,7 +1675,7 @@ class WireGLWidget(QOpenGLWidget):
 
     def _fly_step(self, dt, fast):
         k = self.keys
-        spd = 13.0 * fast * dt
+        spd = 13.0 * self.move_mult * fast * dt
         cp = math.cos(self.pitch)
         fx, fy, fz = cp * math.sin(self.yaw), math.sin(self.pitch), -cp * math.cos(self.yaw)
         rx, rz = math.cos(self.yaw), math.sin(self.yaw)
@@ -1234,6 +1694,7 @@ class WireGLWidget(QOpenGLWidget):
             dy -= 1.0
         m = math.sqrt(dx * dx + dy * dy + dz * dz)
         if m > 0:
+            self._speed_now = 13.0 * self.move_mult * fast
             self.pos[0] += dx / m * spd
             self.pos[1] += dy / m * spd
             self.pos[2] += dz / m * spd
@@ -1324,8 +1785,8 @@ class WireGLWidget(QOpenGLWidget):
 
     def _market_step(self, dt):
         k = self.keys
-        fast = 2.2 if Qt.Key.Key_Shift in k else 1.0
-        spd = 13.0 * fast * dt
+        fast = self._boost()
+        spd = 13.0 * self.move_mult * fast * dt
         cp = math.cos(self.pitch)
         fx, fy, fz = cp * math.sin(self.yaw), math.sin(self.pitch), -cp * math.cos(self.yaw)
         rx, rz = math.cos(self.yaw), math.sin(self.yaw)
@@ -1345,6 +1806,7 @@ class WireGLWidget(QOpenGLWidget):
         m = math.sqrt(dx * dx + dy * dy + dz * dz)
         descending = dy < -0.01
         if m > 0:
+            self._speed_now = 13.0 * self.move_mult * fast
             if self._on_any_platform() is not None and not descending:
                 self.flying = True          # step off the pad / take a lift
             self.pos[0] += dx / m * spd
@@ -1585,8 +2047,8 @@ class WireGLWidget(QOpenGLWidget):
 
     def _word_step(self, dt):
         k = self.keys
-        fast = 2.2 if Qt.Key.Key_Shift in k else 1.0
-        spd = 13.0 * fast * dt
+        fast = self._boost()
+        spd = 13.0 * self.move_mult * fast * dt
         cp = math.cos(self.pitch)
         fx, fy, fz = cp * math.sin(self.yaw), math.sin(self.pitch), -cp * math.cos(self.yaw)
         rx, rz = math.cos(self.yaw), math.sin(self.yaw)
@@ -1605,6 +2067,7 @@ class WireGLWidget(QOpenGLWidget):
             dy -= 1.0
         m = math.sqrt(dx * dx + dy * dy + dz * dz)
         if m > 0:
+            self._speed_now = 13.0 * self.move_mult * fast
             self.pos[0] += dx / m * spd
             self.pos[1] += dy / m * spd
             self.pos[2] += dz / m * spd
@@ -1622,6 +2085,874 @@ class WireGLWidget(QOpenGLWidget):
             self._peers = self.presence.peers()
             self._online = ok
             self._ghost_line = self.presence.describe()
+
+    # ---- the machine: the box under your feet --------------------------------
+    def _machine_door_pos(self, i, n):
+        a = 2 * math.pi * i / max(1, n) - math.pi * 0.5
+        return (MACHINE_DOOR_R * math.cos(a), MACHINE_FLOOR_Y,
+                MACHINE_DOOR_R * math.sin(a))
+
+    def _machine_figure_pos(self, i, n):
+        a = 2 * math.pi * i / max(1, n) + 0.35
+        return (MACHINE_FIGURE_R * math.cos(a), MACHINE_FLOOR_Y,
+                MACHINE_FIGURE_R * math.sin(a))
+
+    def _machine_road_end(self, i, n):
+        a = 2 * math.pi * i / max(1, n) + 0.9
+        r = MACHINE_R - 3.0
+        return (r * math.cos(a), r * math.sin(a))
+
+    def _machine_at_door(self, a, n):
+        for i in range(max(1, n)):
+            da = 2 * math.pi * i / max(1, n) - math.pi * 0.5
+            if abs((a - da + math.pi) % (2 * math.pi) - math.pi) <= 0.16:
+                return True
+        return False
+
+    def _machine_door_index(self, door):
+        doors = (self.machine_world or {}).get("doors", [])
+        try:
+            return doors.index(door), max(1, len(doors))
+        except ValueError:
+            return 0, max(1, len(doors))
+
+    def _machine_door_for_figure(self, fig):
+        """Resolve a figure's 'touched' door against the doors we actually have,
+        for the x-ray line only — never a guess: only a port we can truly see."""
+        for d in (self.machine_world or {}).get("doors", []):
+            if f":{d['lport']}" in (fig.get("touched") or ""):
+                i, n = self._machine_door_index(d)
+                return self._machine_door_pos(i, n)
+        return None
+
+    def _enter_machine(self):
+        """Step down the hatch into THIS machine — a local, defensive model."""
+        try:
+            self.machine_world = machinevision.build()
+        except Exception as e:
+            self._flash(f"could not read the machine: {e}")
+            return
+        self.machine = True
+        self.market = False
+        self.word = False
+        self.exchange = False
+        self.market_world = None
+        self.deep = None
+        self.transition = None
+        self.service = None
+        self.machine_xray = False
+        self.machine_birds_armed = False
+        self._machine_arm_until = 0.0
+        self._machine_contain_confirm = None
+        self._machine_release_until = 0.0
+        self.machine_autoguard = False
+        self._machine_auto_until = 0.0
+        self._auto_attempts = {}
+        try:
+            self._machine_contained = birdguard.contained()
+        except Exception:
+            self._machine_contained = {}
+        self.flying = True
+        self.active = 0
+        self.pos = [0.0, MACHINE_FLOOR_Y + EYE, 11.0]
+        self.yaw = 0.0
+        self.pitch = -0.03
+        h = self.machine_world.get("host", {})
+        c = self.machine_world.get("counts", {})
+        b = self.machine_world.get("birds", [])
+        held = f" \u00b7 {len(self._machine_contained)} held" if self._machine_contained else ""
+        self._flash(f"the machine \u00b7 {h.get('name', '?')} \u2014 {c.get('doors', 0)} doors "
+                    f"\u00b7 {c.get('roads', 0)} roads \u00b7 {c.get('inhabitants', 0)} "
+                    f"inhabitants \u00b7 {c.get('figures', 0)} dark figures \u00b7 "
+                    f"{len(b)} birds (read-only{held})")
+        if self.live_effective == "capture":
+            self._start_capture()
+        self.machine_changed.emit()
+
+    def _leave_machine(self):
+        was = self.machine
+        self.machine = False
+        self.machine_world = None
+        self._stop_capture()            # never capture while you are elsewhere
+        self.machine_xray = False
+        self.machine_birds_armed = False
+        self._machine_arm_until = 0.0
+        self._machine_contain_confirm = None
+        self._machine_release_until = 0.0
+        self.machine_autoguard = False
+        self._machine_auto_until = 0.0
+        self._auto_attempts = {}
+        self.flying = False
+        self.pos = [0.0, EYE, 19.0]
+        self.yaw = math.pi
+        self.pitch = -0.05
+        self.active = 0
+        if was:
+            self._flash("back on the wire \u2014 the machine is still under your feet")
+        self.machine_changed.emit()
+
+    def refresh_machine(self):
+        """Re-read THIS host from /proc and rebuild the machine room (B inside)."""
+        if not self.machine:
+            return
+        try:
+            self.machine_world = machinevision.build()
+        except Exception as e:
+            self._flash(f"machine rebuild failed: {e}")
+            return
+        h = self.machine_world.get("host", {})
+        c = self.machine_world.get("counts", {})
+        self._flash(f"machine rebuilt \u00b7 {h.get('name', '?')} \u00b7 "
+                    f"{c.get('doors', 0)} doors \u00b7 {c.get('figures', 0)} dark figures")
+        self.update()
+
+    def _machine_step(self, dt):
+        k = self.keys
+        fast = self._boost()
+        spd = 13.0 * self.move_mult * fast * dt
+        cp = math.cos(self.pitch)
+        fx, fy, fz = cp * math.sin(self.yaw), math.sin(self.pitch), -cp * math.cos(self.yaw)
+        rx, rz = math.cos(self.yaw), math.sin(self.yaw)
+        dx = dy = dz = 0.0
+        if Qt.Key.Key_W in k:
+            dx += fx; dy += fy; dz += fz
+        if Qt.Key.Key_S in k:
+            dx -= fx; dy -= fy; dz -= fz
+        if Qt.Key.Key_A in k:
+            dx -= rx; dz -= rz
+        if Qt.Key.Key_D in k:
+            dx += rx; dz += rz
+        if Qt.Key.Key_Space in k:
+            dy += 1.0
+        if Qt.Key.Key_C in k:
+            dy -= 1.0
+        m = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if m > 0:
+            self._speed_now = 13.0 * self.move_mult * fast
+            self.pos[0] += dx / m * spd
+            self.pos[1] += dy / m * spd
+            self.pos[2] += dz / m * spd
+        rr = math.hypot(self.pos[0], self.pos[2])
+        if rr > MACHINE_R - 1.5:
+            self.pos[0] = self.pos[0] / rr * (MACHINE_R - 1.5)
+            self.pos[2] = self.pos[2] / rr * (MACHINE_R - 1.5)
+        self.pos[1] = max(MACHINE_FLOOR_Y + EYE * 0.4,
+                          min(MACHINE_FLOOR_Y + 46.0, self.pos[1]))
+
+    def _machine_sky(self):
+        glClearColor(0.006, 0.014, 0.011, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        y = MACHINE_FLOOR_Y
+        glLineWidth(1.0)
+        glColor4f(0.10, 0.24, 0.16, 1.0)
+        glBegin(GL_LINE_LOOP)
+        for i in range(64):
+            a = 2 * math.pi * i / 64
+            glVertex3f((MACHINE_R - 1.0) * math.cos(a), y + 0.02,
+                       (MACHINE_R - 1.0) * math.sin(a))
+        glEnd()
+
+    def _draw_machine(self, t):
+        w = self.machine_world or {}
+        y = MACHINE_FLOOR_Y
+        g = MACHINE_COL
+        # the floor: a slab of dark steel with a diagnostic ring grid
+        glColor4f(0.010, 0.026, 0.020, 1.0)
+        glBegin(GL_TRIANGLE_FAN)
+        glVertex3f(0, y, 0)
+        for i in range(49):
+            a = 2 * math.pi * i / 48
+            glVertex3f(MACHINE_R * math.cos(a), y, MACHINE_R * math.sin(a))
+        glEnd()
+        for r in (7, 14, 21, MACHINE_WALL_R):
+            glColor4f(0.05, 0.16, 0.11, 1.0)
+            glBegin(GL_LINE_LOOP)
+            for i in range(64):
+                a = 2 * math.pi * i / 64
+                glVertex3f(r * math.cos(a), y + 0.03, r * math.sin(a))
+            glEnd()
+
+        # the shell's wall: a hard ring outside the doors, broken at each door
+        doors = w.get("doors", [])
+        nd = max(1, len(doors))
+        step = 0.09
+        a = 0.0
+        while a < 2 * math.pi:
+            if not self._machine_at_door(a, nd):
+                xx, zz = MACHINE_WALL_R * math.cos(a), MACHINE_WALL_R * math.sin(a)
+                self._cube(xx, y + 1.6, zz, 0.5, 3.2, step * MACHINE_WALL_R * 1.2,
+                           (0.06, 0.20, 0.13))
+            a += step
+
+        # the roads: live connections, paths already drawn on the wire
+        roads = w.get("roads", [])
+        nr = max(1, len(roads))
+        for i, r in enumerate(roads):
+            ex, ez = self._machine_road_end(i, nr)
+            if r.get("inbound"):
+                col = (0.95, 0.45, 0.30)
+            elif r.get("external"):
+                col = (0.30, 0.70, 0.98)
+            else:
+                col = (0.35, 0.80, 0.85)
+            glColor4f(col[0] * 0.6, col[1] * 0.6, col[2] * 0.6, 0.35)
+            glLineWidth(1.0)
+            glBegin(GL_LINES)
+            glVertex3f(0, y + 0.06, 0)
+            glVertex3f(ex, y + 0.06, ez)
+            glEnd()
+            q = (t * 0.4 + i * 0.37) % 1.0
+            qq = (1.0 - q) if r.get("inbound") else q
+            mx, mz = ex * qq, ez * qq
+            glColor4f(col[0], col[1], col[2], 0.9)
+            glBegin(GL_LINES)
+            glVertex3f(mx, y + 0.07, mz)
+            glVertex3f(mx, y + 0.5, mz)
+            glEnd()
+
+        # the shell core: THIS host — a hex monolith breathing like the box
+        beat = 1.0 + 0.10 * math.sin(t * 1.4)
+        self._prism(0, 0, 2.4 * beat, 1.5 * beat, y, y + 11.0, 6, (0.07, 0.30, 0.20))
+        self._prism(0, 0, 1.6 * beat, 2.9 * beat, y + 11.0, y + 13.0, 6, (0.10, 0.40, 0.27))
+        self._octa(0, y + 14.4, 0, 1.5 * beat, (0.55, 1.0, 0.72))
+        rot = t * 0.5
+        glColor4f(g[0], g[1], g[2], 0.5)
+        glLineWidth(2.0)
+        glBegin(GL_LINE_LOOP)
+        for i in range(48):
+            aa = 2 * math.pi * i / 48 + rot
+            glVertex3f(3.6 * math.cos(aa), y + 0.08, 3.6 * math.sin(aa))
+        glEnd()
+        glLineWidth(1.0)
+
+        # the doors: a way in, each with the program that owns it standing at it
+        for i, d in enumerate(doors):
+            self._machine_door(*self._machine_door_pos(i, nd), d, t)
+        # inhabitants that hold no door (a road only) stand beside the core
+        self._machine_extra_inhabitants(w, t)
+
+        # the dark figures: intruders in the field, only from local evidence
+        figs = w.get("figures", [])
+        nf = max(1, len(figs))
+        for i, f in enumerate(figs):
+            self._machine_figure(*self._machine_figure_pos(i, nf), y, f, t, i)
+
+        # the birds: crow / finch / raven, perched above the core in a slow orbit
+        self._machine_birds(w, t)
+
+        # live vision: the motion a real read just measured (the knob)
+        self._live_render(w, t)
+
+        # x-ray: the line through the wall to the door a figure touched
+        if self.machine_xray and figs:
+            glLineWidth(2.0)
+            glColor4f(1.0, 0.75, 0.25, 0.85)
+            for i, f in enumerate(figs):
+                hit = self._machine_door_for_figure(f)
+                if hit is None:
+                    continue
+                fx, _, fz = self._machine_figure_pos(i, nf)
+                glBegin(GL_LINES)
+                glVertex3f(fx, y + 2.0, fz)
+                glVertex3f(hit[0], y + 2.0, hit[2])
+                glEnd()
+                self._octa(hit[0], y + 3.0, hit[2], 0.5, (1.0, 0.8, 0.3), squash=1.4)
+            glLineWidth(1.0)
+
+        # the way back up: the hatch you came down
+        rx, ry, rz = MACHINE_RETURN_POS
+        self._portal(rx, rz, ry - 0.5, 3.0, (0.45, 0.85, 1.0), t + 0.4)
+        self._portal(rx, rz, ry + 2.5, 2.0, (0.28, 0.55, 0.80), t + 1.4)
+
+    def _machine_door(self, x, y, z, d, t):
+        col = (0.30, 0.88, 0.58) if d.get("proc") else (0.35, 0.55, 0.45)
+        self._cube(x, y + 1.4, z, 1.1, 2.8, 0.4,
+                   (col[0] * 0.3, col[1] * 0.35, col[2] * 0.3))
+        self._portal(x, z, y + 1.0, 1.5, col, t + x * 0.3)
+        if d.get("proc"):
+            h = int(hashlib.md5((d.get("proc") or "?").encode()).hexdigest()[:8], 16)
+            pc = (0.45 + 0.55 * ((h >> 16) & 255) / 255,
+                  0.45 + 0.55 * ((h >> 8) & 255) / 255,
+                  0.45 + 0.55 * (h & 255) / 255)
+            ix, iz = x * 0.86, z * 0.86
+            self._octa(ix, y + 2.6, iz, 0.5, pc, squash=1.2)
+            self._cube(ix, y + 1.0, iz, 0.7, 1.2, 0.7,
+                       (pc[0] * 0.55, pc[1] * 0.55, pc[2] * 0.55))
+
+    def _machine_extra_inhabitants(self, w, t):
+        y = MACHINE_FLOOR_Y
+        door_pids = {d.get("pid") for d in w.get("doors", []) if d.get("pid")}
+        extra = [p for p in w.get("inhabitants", [])
+                 if p.get("pid") not in door_pids and p.get("roads")]
+        ne = max(1, len(extra))
+        for i, p in enumerate(extra):
+            a = 2 * math.pi * i / ne + 1.3
+            x, z = 5.5 * math.cos(a), 5.5 * math.sin(a)
+            h = int(hashlib.md5((p.get("name") or "?").encode()).hexdigest()[:8], 16)
+            pc = (0.45 + 0.55 * ((h >> 16) & 255) / 255,
+                  0.45 + 0.55 * ((h >> 8) & 255) / 255,
+                  0.45 + 0.55 * (h & 255) / 255)
+            self._octa(x, y + 2.0 + 0.25 * math.sin(t * 2 + i), z, 0.5, pc, squash=1.2)
+            self._cube(x, y + 1.0, z, 0.7, 1.2, 0.7,
+                       (pc[0] * 0.55, pc[1] * 0.55, pc[2] * 0.55))
+
+    def _machine_figure(self, x, y, z, f, t, i):
+        sev = int(f.get("severity") or 2)
+        k = 0.85 + 0.22 * sev
+        col = (0.80, 0.10, 0.14) if sev >= 3 else (0.62, 0.16, 0.24)
+        if f.get("confidence") == "inferred":
+            col = tuple(c * 0.7 for c in col)
+        bob = 0.3 * math.sin(t * 1.6 + i)
+        self._octa(x, y + 2.4 * k + bob, z, 0.7 * k, col, squash=1.9)
+        self._cube(x, y + 1.0, z, 1.0 * k, 1.6 * k, 1.0 * k,
+                   (col[0] * 0.4, col[1] * 0.4, col[2] * 0.45))
+        glColor4f(col[0] * 0.5, col[1] * 0.5, col[2] * 0.6, 0.35)
+        glLineWidth(1.5)
+        glBegin(GL_LINE_LOOP)
+        for j in range(20):
+            aa = 2 * math.pi * j / 20
+            glVertex3f(x + 2.2 * math.cos(aa), y + 0.06, z + 2.2 * math.sin(aa))
+        glEnd()
+        glLineWidth(1.0)
+
+    def _machine_bird_pos(self, i):
+        a = 2 * math.pi * i / 3 - math.pi * 0.5
+        return (MACHINE_BIRD_R * math.cos(a), MACHINE_BIRD_Y,
+                MACHINE_BIRD_R * math.sin(a))
+
+    def _machine_birds(self, w, t):
+        for i, b in enumerate(w.get("birds", [])):
+            x, y, z = self._machine_bird_pos(i)
+            self._machine_bird(x, y, z, b, t, i)
+        # the armed halo: one ring over the whole perch when finch's hand is live
+        if self.machine_birds_armed:
+            glColor4f(1.0, 0.35, 0.30, 0.5)
+            glLineWidth(2.0)
+            glBegin(GL_LINE_LOOP)
+            for i in range(48):
+                a = 2 * math.pi * i / 48 + t * 0.4
+                glVertex3f((MACHINE_BIRD_R + 1.6) * math.cos(a), MACHINE_BIRD_Y + 2.6,
+                           (MACHINE_BIRD_R + 1.6) * math.sin(a))
+            glEnd()
+            glLineWidth(1.0)
+
+    def _machine_bird(self, x, y, z, b, t, i):
+        kind = b.get("kind", "crow")
+        col = BIRD_COL.get(kind, (0.8, 0.8, 0.9))
+        bob = 0.4 * math.sin(t * 1.8 + i)
+        yy = y + bob
+        if kind == "raven":
+            k = 1.3
+        elif kind == "finch":
+            k = 0.8
+        else:
+            k = 1.0
+        # a small low-poly bird: body + two wings that beat
+        flap = 0.4 + 0.5 * abs(math.sin(t * 3.2 + i * 1.7))
+        glColor4f(col[0] * 0.5, col[1] * 0.5, col[2] * 0.5, 1.0)
+        glBegin(GL_TRIANGLES)
+        glVertex3f(x, yy, z - 0.6 * k); glVertex3f(x, yy, z + 0.6 * k)
+        glVertex3f(x, yy + 0.5 * k, z)
+        glVertex3f(x, yy + 0.2 * k, z)
+        glVertex3f(x - 1.6 * k, yy + flap * k, z)
+        glVertex3f(x, yy + 0.2 * k, z + 0.5 * k)
+        glVertex3f(x, yy + 0.2 * k, z)
+        glVertex3f(x + 1.6 * k, yy + flap * k, z)
+        glVertex3f(x, yy + 0.2 * k, z + 0.5 * k)
+        glEnd()
+        # an eye/reticle: green when it has nothing to say, red when armed+held
+        if kind == "finch" and self.machine_birds_armed:
+            ec = (1.0, 0.35, 0.30)
+        else:
+            ec = (0.75, 1.0, 0.85)
+        self._octa(x, yy + 0.15 * k, z, 0.18 * k, ec, squash=1.0)
+
+    def _machine_labels(self):
+        out = []
+        vp = glGetIntegerv(GL_VIEWPORT)
+        items = []
+        w = self.machine_world or {}
+        y = MACHINE_FLOOR_Y
+        doors = w.get("doors", [])
+        n = max(1, len(doors))
+        px, pz = self.pos[0], self.pos[2]
+        ranked = []
+        for i, d in enumerate(doors):
+            dx, _, dz = self._machine_door_pos(i, n)
+            ranked.append(((px - dx) ** 2 + (pz - dz) ** 2, dx, dz, d))
+        ranked.sort(key=lambda c: c[0])
+        for (_dd, dx, dz, d) in ranked[:6]:
+            name = machinevision.SERVICE_NAMES.get(d["lport"], "?")
+            who = d.get("proc") or "?"
+            items.append((dx, y + 4.2, dz,
+                          f"door {d['proto']} :{d['lport']} {name} \u2014 {who} [E]",
+                          (0.62, 1.0, 0.72)))
+        figs = w.get("figures", [])
+        nf = max(1, len(figs))
+        for i, f in enumerate(figs):
+            fx, _, fz = self._machine_figure_pos(i, nf)
+            held = str(f.get("src")) in self._machine_contained
+            tag = " \u2014 HELD [L to release]" if held else " [E]"
+            items.append((fx, y + 5.4, fz,
+                          f"dark figure \u00b7 {f['kind']} {f['src']} \u00b7 {f['confidence']}{tag}",
+                          (0.55, 0.95, 0.65) if held else (1.0, 0.45, 0.42)))
+        for i, b in enumerate(w.get("birds", [])):
+            bx, by, bz = self._machine_bird_pos(i)
+            short = b.get("role", "")
+            items.append((bx, by + 2.4, bz,
+                          f"{b['kind']} \u00b7 {short} [E]" +
+                          (" \u00b7 ARMED" if self.machine_birds_armed and b["kind"] == "finch" else ""),
+                          BIRD_COL.get(b.get("kind"), (0.8, 0.8, 0.9))))
+        items.append((0, y + 16.4, 0,
+                      f"THIS MACHINE \u00b7 {w.get('host', {}).get('name', '?')} "
+                      f"\u2014 the box under your feet", (0.62, 1.0, 0.72)))
+        rx, ry, rz = MACHINE_RETURN_POS
+        items.append((rx, ry + 2.6, rz, "up the hatch [E] \u2014 back to the wire",
+                      (0.70, 0.90, 1.0)))
+        for (x, yy, z, txt, col) in items:
+            try:
+                sx, sy, sz = gluProject(x, yy, z)
+            except Exception:
+                continue
+            if sz < 0 or sz > 1:
+                continue
+            out.append((sx, vp[3] - sy, txt, col))
+        return out
+
+    def _nearest_machine(self):
+        px, pz = self.pos[0], self.pos[2]
+        best = None
+
+        def consider(kind, x, z, radius, **kw):
+            nonlocal best
+            d = math.hypot(px - x, pz - z)
+            if d <= radius and (best is None or d < best["d"]):
+                best = {"kind": kind, "d": d, **kw}
+
+        w = self.machine_world or {}
+        doors = w.get("doors", [])
+        n = max(1, len(doors))
+        for i, d in enumerate(doors):
+            x, _, z = self._machine_door_pos(i, n)
+            consider("machine_door", x, z, 3.4, door=d)
+        figs = w.get("figures", [])
+        nf = max(1, len(figs))
+        for i, f in enumerate(figs):
+            x, _, z = self._machine_figure_pos(i, nf)
+            consider("machine_figure", x, z, 4.2, fig=f)
+        for i, b in enumerate(w.get("birds", [])):
+            x, _, z = self._machine_bird_pos(i)
+            consider("machine_bird", x, z, MACHINE_BIRD_NEAR, bird=b)
+        consider("machine_leave", MACHINE_RETURN_POS[0], MACHINE_RETURN_POS[2], 5.5)
+        return best
+
+    def _machine_figure_talk(self, f):
+        """Read a figure; if the birds are armed, finch may contain it (2-press)."""
+        ev = (f.get("evidence") or [""])[0]
+        ip = str(f.get("src") or "")
+        if not self.machine_birds_armed:
+            held = " \u2014 HELD (L to release)" if ip in self._machine_contained else ""
+            self._flash(f"dark figure \u00b7 {f['kind']} {f['src']} \u2014 touched "
+                        f"{f['touched']} \u00b7 {f['confidence']} \u00b7 {ev}{held} "
+                        f"\u2014 press K to arm the birds", 6.0)
+            return
+        ok, why = birdguard.usable(ip)
+        if not ok:
+            self._flash(f"finch can't contain {ip or 'that'} \u2014 {why}", 5.0)
+            return
+        now = time.time()
+        conf = self._machine_contain_confirm
+        if conf and conf[0] == ip and now < conf[1]:
+            res = birdguard.contain(ip, reason=f"dark figure {f['kind']} {f['src']} \u2014 {ev}")
+            self._machine_contain_confirm = None
+            if res.get("ok"):
+                self._machine_contained = birdguard.contained()
+                extra = " (dry run)" if res.get("dry") else ""
+                self._flash(f"finch contained {ip}{extra} \u2014 host-local DROP in "
+                            f"{birdguard.CHAIN}; press L to release", 6.0)
+            else:
+                self._flash(f"finch could not contain {ip}: "
+                            f"{res.get('refused') or res.get('error')}", 6.0)
+            return
+        self._machine_contain_confirm = (ip, now + 5.0)
+        self._flash(f"press E again to CONTAIN {ip} \u2014 a host-local DROP at THIS NIC, "
+                    f"never aimed at anyone else", 5.0)
+
+    def _machine_bird_talk(self, b):
+        k = b.get("kind")
+        armed = self.machine_birds_armed
+        if k == "crow":
+            msg = (f"crow \u00b7 recon / eyes \u2014 read-only \u00b7 {b.get('age', '?')} \u00b7 "
+                   f"{b.get('verdict') or b.get('returned') or 'no report yet'}")
+        elif k == "finch":
+            msg = (f"finch \u00b7 quarantine / contain (host-local) \u2014 "
+                   f"{'ARMED' if armed else 'read-only (K to arm)'} \u00b7 baseline "
+                   f"{b.get('baseline_age')} \u00b7 trusted {b.get('trusted_ssid')} \u00b7 "
+                   f"{b.get('quarantine_files')} file(s) held")
+        else:
+            msg = (f"raven \u00b7 scope gate \u2014 read-only \u00b7 up={b.get('up')} "
+                   f"gw={b.get('gw')} guard={b.get('guard_mode')} strikes={b.get('strikes')} "
+                   f"survival={b.get('survival')}")
+        self._flash(msg, 7.0)
+
+    def _machine_arm_toggle(self):
+        now = time.time()
+        if self.machine_birds_armed:
+            self.machine_birds_armed = False
+            self.machine_autoguard = False     # auto cannot run unarmed
+            self._machine_contain_confirm = None
+            self._flash("birds stood down \u2014 read-only again")
+            return
+        if now < self._machine_arm_until:
+            self.machine_birds_armed = True
+            self._machine_arm_until = 0.0
+            self._flash("birds ARMED \u2014 only finch acts, and only on THIS machine "
+                        "(host-local DROP); K to stand down, L to release", 7.0)
+            return
+        self._machine_arm_until = now + 4.0
+        self._flash("press K again to ARM the birds \u2014 finch's hand becomes live, "
+                    "host-local only; nothing is ever aimed at another host", 6.0)
+
+    def _machine_release_toggle(self):
+        now = time.time()
+        if not self._machine_contained:
+            self._flash("nothing is held \u2014 the firewall is clean")
+            return
+        n = len(self._machine_contained)
+        if now < self._machine_release_until:
+            birdguard.release_all()
+            self._machine_contained = {}
+            self._machine_release_until = 0.0
+            self._machine_contain_confirm = None
+            self._flash(f"released {n} held source(s) \u2014 firewall clean")
+            return
+        self._machine_release_until = now + 4.0
+        self._flash(f"press L again to RELEASE all {n} held source(s)")
+
+    def _machine_autoguard_toggle(self):
+        """Phase 3: finch detects and contains on its own. Needs the birds armed."""
+        now = time.time()
+        if self.machine_autoguard:
+            self.machine_autoguard = False
+            self._machine_auto_until = 0.0
+            self._flash("auto-defend OFF \u2014 finch waits for your E again")
+            return
+        if not self.machine_birds_armed:
+            self._flash("auto-defend needs the birds armed first (K)", 5.0)
+            return
+        if now < self._machine_auto_until:
+            self.machine_autoguard = True
+            self._machine_auto_until = 0.0
+            self._flash("AUTO-DEFEND ON \u2014 finch now finds & contains dark figures by "
+                        "itself, host-local only, defensively; L still releases", 8.0)
+            return
+        self._machine_auto_until = now + 5.0
+        self._flash("press M again to switch AUTO-DEFEND ON \u2014 finch acts without E, "
+                    "still never aimed at anyone else", 6.0)
+
+    def _machine_autoguard_beat(self):
+        """The auto-defend loop: live-detect, then contain on THIS host only.
+        Only observed figures (never the inferred road figures), with all of
+        birdguard's guardrails, one action per beat, cooldowned per source."""
+        if not self.machine or not self.machine_autoguard or not self.machine_birds_armed:
+            return
+        now = time.time()
+        try:
+            figs = machinevision.build().get("figures", [])
+        except Exception:
+            return
+        for f in figs:
+            if f.get("confidence") == "inferred":
+                continue                      # a live road is a pointer, not a crime
+            ip = str(f.get("src") or "")
+            if not ip or ip in self._machine_contained:
+                continue
+            if now - self._auto_attempts.get(ip, 0.0) < 30:
+                continue                      # cooldown: don't re-bark at a refusal
+            self._auto_attempts[ip] = now
+            ok, why = birdguard.usable(ip)
+            if not ok:
+                continue                      # self/gateway/reserved — never touched
+            ev = (f.get("evidence") or [""])[0]
+            res = birdguard.contain(ip, reason="[auto] " + " \u00b7 ".join(
+                str(x) for x in (f.get("kind"), f.get("touched") or "", ev) if x))
+            if res.get("ok"):
+                try:
+                    self.machine_world = machinevision.build()   # room now reflects it
+                    self._machine_contained = birdguard.contained()
+                except Exception:
+                    pass
+                dry = " (dry run)" if res.get("dry") else ""
+                self._flash(f"AUTO \u00b7 finch contained {ip} \u2014 {f.get('kind')}{dry} "
+                            f"\u00b7 host-local DROP at THIS NIC, L to release", 8.0)
+                self.update()
+            self.machine_changed.emit()
+            return
+
+    # ---- live vision (the knob: off / delta / capture / auto) ---------------
+    def _apply_saved_live_mode(self):
+        try:
+            mode = wiresettings.load().get("live_mode", "auto")
+        except Exception:
+            mode = "off"
+        self.set_live_mode(mode, save=False)
+
+    def set_live_mode(self, mode, save=True):
+        """Turn the live-vision knob. Returns the auto-detect read, if any."""
+        if mode not in wiresettings.MODES:
+            mode = "off"
+        self.live_mode = mode
+        try:
+            eff, info = wiresettings.resolve(mode)
+        except Exception:
+            eff, info = "off", None
+        self.live_effective = eff
+        self._live_info = info
+        self._live_prev = None
+        self._live = {}
+        self._live_t = 0.0
+        self._live_timer.stop()
+        self._stop_capture()
+        if eff == "delta":
+            self._live_timer.start(1000)
+            self._live_sample()
+        elif eff == "capture":
+            self._live_timer.start(2000)     # still read cpu/disk/io for the HUD
+            self._live_sample()
+            self._start_capture()
+        if save:
+            try:
+                st = wiresettings.load()
+                st["live_mode"] = mode
+                st["live_effective"] = eff
+                wiresettings.save(st)
+            except Exception:
+                pass
+        self.live_changed.emit(self.live_mode, self.live_effective)
+        self.update()
+        return info
+
+    def _start_capture(self):
+        if self._capture is not None or not self.machine:
+            return
+        iface = "any"
+        try:
+            iface = ((self.machine_world or {}).get("lifeline", {})
+                     .get("iface")) or "any"
+        except Exception:
+            iface = "any"
+        try:
+            max_pps = wiresettings.load().get("capture_max_pps", 400)
+        except Exception:
+            max_pps = 400
+        self._capture = _PacketReader(iface, max_pps)
+        self._capture.start()
+
+    def _stop_capture(self):
+        c, self._capture = self._capture, None
+        if c is not None:
+            try:
+                c.stop()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _rd(path):
+        try:
+            with open(path) as f:
+                return f.read()
+        except Exception:
+            return ""
+
+    def _read_dev(self):
+        out = {}
+        for line in self._rd("/proc/net/dev").splitlines():
+            if ":" not in line:
+                continue
+            name, rest = line.split(":", 1)
+            f = rest.split()
+            if len(f) < 16:
+                continue
+            try:
+                out[name.strip()] = (int(f[0]), int(f[8]), int(f[1]), int(f[9]))
+            except Exception:
+                pass
+        return out
+
+    def _read_stat(self):
+        try:
+            f = self._rd("/proc/stat").splitlines()[0].split()[1:]
+            v = [int(x) for x in f]
+            idle = v[3] + (v[4] if len(v) > 4 else 0)
+            return (sum(v), idle)
+        except Exception:
+            return None
+
+    def _read_disk(self):
+        rd = wr = 0
+        for line in self._rd("/proc/diskstats").splitlines():
+            f = line.split()
+            if len(f) < 14:
+                continue
+            try:
+                rd += int(f[5]); wr += int(f[9])
+            except Exception:
+                pass
+        return (rd, wr)
+
+    def _read_pio(self, pid):
+        try:
+            d = {}
+            for ln in self._rd(f"/proc/{pid}/io").splitlines():
+                k, _, v = ln.partition(":")
+                d[k.strip()] = int(v.strip())
+            return (d.get("rchar", 0), d.get("wchar", 0),
+                    d.get("read_bytes", 0), d.get("write_bytes", 0))
+        except Exception:
+            return None
+
+    def _live_sample(self):
+        now = time.time()
+        dev = self._read_dev()
+        stat = self._read_stat()
+        disk = self._read_disk()
+        w = self.machine_world or {}
+        pio = {}
+        for p in w.get("inhabitants", []):
+            pid = p.get("pid")
+            if not pid:
+                continue
+            r = self._read_pio(pid)
+            if r is not None:
+                pio[pid] = r
+        prev = self._live_prev
+        live = {"t": now, "dev": {}, "cpu": None, "disk": None, "proc": {}}
+        if prev is not None:
+            dt = max(0.2, now - prev["t"])
+            for name, cur in dev.items():
+                p = prev["dev"].get(name)
+                if not p:
+                    continue
+                live["dev"][name] = {
+                    "rx_bps": max(0.0, (cur[0] - p[0]) / dt),
+                    "tx_bps": max(0.0, (cur[1] - p[1]) / dt),
+                    "rx_pps": max(0.0, (cur[2] - p[2]) / dt),
+                    "tx_pps": max(0.0, (cur[3] - p[3]) / dt)}
+            if stat and prev["stat"]:
+                dtot = stat[0] - prev["stat"][0]
+                didle = stat[1] - prev["stat"][1]
+                if dtot > 0:
+                    live["cpu"] = max(0.0, min(1.0, 1.0 - didle / dtot))
+            if disk and prev["disk"]:
+                live["disk"] = {
+                    "r_bps": max(0.0, (disk[0] - prev["disk"][0]) * 512 / dt),
+                    "w_bps": max(0.0, (disk[1] - prev["disk"][1]) * 512 / dt)}
+            for pid, cur in pio.items():
+                p = prev["pio"].get(pid)
+                if not p:
+                    continue
+                live["proc"][pid] = {
+                    "rd_bps": max(0.0, (cur[0] - p[0]) / dt),
+                    "wr_bps": max(0.0, (cur[1] - p[1]) / dt)}
+        self._live_prev = {"t": now, "dev": dev, "stat": stat,
+                           "disk": disk, "pio": pio}
+        a = 0.5
+        if self._live:
+            for name, cur in live["dev"].items():
+                old = (self._live.get("dev") or {}).get(name)
+                if old:
+                    for k in ("rx_bps", "tx_bps", "rx_pps", "tx_pps"):
+                        cur[k] = old[k] * (1 - a) + cur[k] * a
+            if live["cpu"] is not None and self._live.get("cpu") is not None:
+                live["cpu"] = self._live["cpu"] * (1 - a) + live["cpu"] * a
+        self._live = live
+        if self.machine:
+            self.update()
+
+    def _live_totals(self):
+        rx = tx = pps = 0.0
+        for name, r in (self._live.get("dev") or {}).items():
+            if name == "lo":
+                continue
+            rx += r["rx_bps"]; tx += r["tx_bps"]
+            pps += r["rx_pps"] + r["tx_pps"]
+        return rx, tx, pps
+
+    def _top_writer(self):
+        proc = self._live.get("proc") or {}
+        if not proc:
+            return None
+        names = {p.get("pid"): (p.get("name") or str(p.get("pid")))
+                 for p in (self.machine_world or {}).get("inhabitants", [])}
+        pid, best = None, 0.0
+        for p, r in proc.items():
+            if r.get("wr_bps", 0.0) > best:
+                pid, best = p, r["wr_bps"]
+        if pid is None or best < 200_000:
+            return None
+        return (names.get(pid, f"pid {pid}"), best)
+
+    def _live_render(self, w, t):
+        """Draw the motion that a real read just measured — never invented."""
+        if self.live_effective == "off":
+            return
+        y = MACHINE_FLOOR_Y
+        cpu = self._live.get("cpu")
+        rx, tx, pps = self._live_totals()
+        if cpu is not None:
+            glColor4f(0.40, 1.0, 0.70, 0.10 + 0.45 * cpu)
+            glLineWidth(3.0)
+            glBegin(GL_LINE_LOOP)
+            for i in range(64):
+                aa = 2 * math.pi * i / 64
+                r = 3.9 + 0.6 * cpu
+                glVertex3f(r * math.cos(aa), y + 0.10, r * math.sin(aa))
+            glEnd()
+            glLineWidth(1.0)
+        n = int(min(48, 3 + pps * 0.05))
+        speed = 0.15 + min(1.8, (rx + tx) / 2_000_000.0)
+        for i in range(max(0, n)):
+            a = (i * (2 * math.pi / max(1, n)) + t * speed) % (2 * math.pi)
+            rr = MACHINE_WALL_R - 1.5
+            self._octa(rr * math.cos(a), y + 1.6, rr * math.sin(a), 0.16,
+                       (0.5, 1.0, 0.75))
+        d = self._live.get("disk") or {}
+        io = d.get("w_bps", 0.0) + d.get("r_bps", 0.0)
+        if io:
+            h = min(7.0, 0.4 + io / 3_000_000.0)
+            glColor4f(0.92, 0.76, 0.30, 0.6)
+            glLineWidth(2.0)
+            glBegin(GL_LINES)
+            glVertex3f(5.2, y + 0.05, 3.4)
+            glVertex3f(5.2, y + 0.05 + h, 3.4)
+            glEnd()
+            glLineWidth(1.0)
+        if self.live_effective == "capture" and self._capture is not None:
+            now = time.time()
+            for j, p in enumerate(list(self._capture.packets)[-120:]):
+                q = max(0.0, min(1.0, (now - p.get("ts", now)) / 2.0))
+                a = (j * 2.399) % (2 * math.pi)
+                r = MACHINE_WALL_R * (1.0 - q)
+                self._octa(r * math.cos(a), y + 1.0 + 2.6 * (1.0 - q),
+                           r * math.sin(a), 0.12, (1.0, 0.55, 0.42))
+
+    def _live_line(self):
+        eff = self.live_effective
+        if eff == "off":
+            return "LIVE [knob] off \u2014 a snapshot (press B to rebuild)"
+        cpu = self._live.get("cpu")
+        rx, tx, pps = self._live_totals()
+        cpu_s = "\u2014" if cpu is None else f"{int(cpu * 100)}%"
+        s = (f"LIVE [knob] {eff} \u00b7 cpu {cpu_s} \u00b7 net "
+             f"\u2193{_hbytes(rx)}/s \u2191{_hbytes(tx)}/s \u00b7 {int(pps)} pkt/s")
+        if eff == "capture" and self._capture is not None:
+            s += f" \u00b7 captured {len(self._capture.packets)}"
+            if self._capture.error:
+                s += f" (capture failed: {self._capture.error})"
+        top = self._top_writer()
+        if top:
+            s += f" \u00b7 writing: {top[0]} {_hbytes(top[1])}/s"
+        return s
 
     def _word_sky(self):
         if self.word_mode == "ayah" and self._word_reci:
@@ -2006,9 +3337,24 @@ class WireGLWidget(QOpenGLWidget):
                     (col[0], col[1], col[2]))
         col2 = (col[0] * 0.7, col[1] * 0.7, col[2] * 0.7)
         self._prism(0, 0, 1.7 * beat, 3.1 * beat, y + 14.0, y + 16.5, 4, col2)
+        # rank of candle-lights round the column top: the way down into the
+        # candle room (DOT/USD's tape). Strictly dressing — a signpost, no datum.
+        for j in range(9):
+            ca = 2 * math.pi * j / 9 + t * 0.25
+            cxx, czz = 2.7 * math.cos(ca), 2.7 * math.sin(ca)
+            cc = CANDLE_UP if j % 2 else CANDLE_AMBER
+            self._cube(cxx, y + 17.6 + 0.35 * math.sin(t * 2.0 + j), czz,
+                       0.26, 0.9 + 0.2 * math.sin(t * 2.0 + j), 0.26, cc)
         # the platforms: one per trading agent, coloured by what it waits for
-        for a in w.get("agents", []):
+        for i, a in enumerate(w.get("agents", [])):
             self._platform_aesthetic(a, t)
+            # the SignalBot's lean, drawn big above the platform so it reads
+            # from across the floor (green points up, red points down)
+            sig = a.get("signal") or {}
+            lean = sig.get("lean") if sig.get("available") else None
+            enabled = a.get("state") != "off"
+            self._signal_arrow(a["pos"][0], a["pos"][1] + 6.9, a["pos"][2],
+                               lean, t + i * 0.7, enabled=enabled)
         # the loop's own wiring: each platform is reached from the centre column,
         # and a pulse of light rides the link (the account hardware talking)
         glLineWidth(1.0)
@@ -2035,6 +3381,52 @@ class WireGLWidget(QOpenGLWidget):
         rx, ry, rz = RETURN_GATE_POS
         self._portal(rx, rz, ry - 0.5, 3.4, (0.85, 0.45, 0.95), t + 1.0)
         self._portal(rx, rz, ry + 2.5, 2.2, (0.60, 0.30, 0.75), t + 2.0)
+        glLineWidth(1.0)
+
+    def _signal_arrow(self, x, y0, z, lean, t, enabled=True, scale=1.9):
+        """The SignalBot's lean as one bold arrow in the sky over the platform:
+        green pointing up, red pointing down, amber flat, grey when the bot has
+        no read. Dressing only — the direction is a vote over the bot's own
+        fields (wiregate computes it); this just points it."""
+        d = (lean or {}).get("dir", "none")
+        base = MARKET_LEAN_COL.get(d, MARKET_LEAN_COL["none"])
+        col = base if enabled else tuple(c * 0.55 for c in base)
+        live = enabled and d in ("up", "down")
+        pulse = 1.0 + (0.16 * math.sin(t * 3.1) if live else 0.05 * math.sin(t * 1.4))
+        r = scale * 0.70 * pulse
+        shaft = scale * 1.0
+        head = scale * 1.35
+        # a soft column of light, so the arrow carries at a distance
+        glColor4f(col[0], col[1], col[2], 0.12 if live else 0.05)
+        glBegin(GL_TRIANGLE_STRIP)
+        for i in range(13):
+            aa = 2 * math.pi * i / 12
+            glVertex3f(x + scale * 0.55 * math.cos(aa), y0 - shaft * 0.6,
+                       z + scale * 0.55 * math.sin(aa))
+            glVertex3f(x + scale * 0.16 * math.cos(aa), y0 + shaft + head,
+                       z + scale * 0.16 * math.sin(aa))
+        glEnd()
+        if d == "up":
+            self._prism(x, z, 0.22 * scale, 0.22 * scale, y0 - shaft, y0, 6,
+                        tuple(c * 0.82 for c in col))
+            self._arrow_head(x, y0, z, r, head, col, up=True)
+        elif d == "down":
+            self._prism(x, z, 0.22 * scale, 0.22 * scale, y0, y0 + shaft, 6,
+                        tuple(c * 0.82 for c in col))
+            self._arrow_head(x, y0, z, r, head, col, up=False)
+        else:
+            # flat / no signal: a still amber bar, clearly not a direction
+            self._cube(x, y0, z, scale * 0.28, scale * 0.28, scale * 2.4, col)
+            self._octa(x, y0, z, scale * 0.5, col, squash=0.4)
+        # a bright ring at the shaft's foot to anchor it to the pad
+        glColor4f(col[0], col[1], col[2], 0.7 if live else 0.4)
+        glLineWidth(2.0)
+        glBegin(GL_LINE_LOOP)
+        for i in range(20):
+            aa = 2 * math.pi * i / 20
+            glVertex3f(x + scale * 0.7 * math.cos(aa), y0 - shaft * 0.6,
+                       z + scale * 0.7 * math.sin(aa))
+        glEnd()
         glLineWidth(1.0)
 
     def _platform_aesthetic(self, a, t):
@@ -2166,9 +3558,19 @@ class WireGLWidget(QOpenGLWidget):
                 txt += f" \u00b7 net {a['net_pct']}%"
             col = MARKET_STATE_COL.get(a["state"], (0.6, 0.6, 0.65))
             items.append((x, yy + 3.5, z, txt, col))
+            sig = a.get("signal") or {}
+            if sig.get("available"):
+                ld = (sig.get("lean") or {}).get("dir", "none")
+                glyph = MARKET_LEAN_GLYPH.get(ld, "\u00b7")
+                txt2 = f"{glyph} {sig.get('summary') or ''}"
+                items.append((x, yy + 5.4, z, txt2,
+                              MARKET_LEAN_COL.get(ld, (0.6, 0.6, 0.65))))
         for p in self._peers:
             items.append((p["x"], p["y"] + 2.0, p["z"], f"\u25c8 {p['name']}",
                           self._peer_col(p["name"])))
+        items.append((0.0, self._market_floor() + 18.5, 0.0,
+                      "the candle room [E] \u2014 down into DOT/USD's tape",
+                      (0.95, 0.72, 0.98)))
         rx, ry, rz = RETURN_GATE_POS
         items.append((rx, ry + 2.6, rz, "leave the market [E] \u2014 back to the wire",
                       (0.90, 0.72, 0.98)))
@@ -2183,12 +3585,16 @@ class WireGLWidget(QOpenGLWidget):
         return out
 
     def _nearest(self):
+        if self.candles:
+            return self._nearest_candles()
         if self.market:
             return self._nearest_market()
         if self.word:
             return self._nearest_word()
         if self.exchange:
             return self._nearest_exchange()
+        if self.machine:
+            return self._nearest_machine()
         if not self.world or self.deep is not None:
             return None
         px, pz = self.pos[0], self.pos[2]
@@ -2205,6 +3611,7 @@ class WireGLWidget(QOpenGLWidget):
             consider("market", MARKET_GATE_POS[0], MARKET_GATE_POS[2], 4.6)
             consider("word", WORD_GATE_POS[0], WORD_GATE_POS[2], 4.6)
             consider("net", NET_GATE_X, NET_GATE_Z, 6.0)
+            consider("machine", MACHINE_HATCH_POS[0], MACHINE_HATCH_POS[2], 4.6)
             for s in self._ruin_segments():
                 dx = WALL_R * math.cos(s["angle"])
                 dz = WALL_R * math.sin(s["angle"])
@@ -2230,6 +3637,8 @@ class WireGLWidget(QOpenGLWidget):
         for a in (self.market_world or {}).get("agents", []):
             x, yy, z = a["pos"]
             consider("platform", x, z, yy, a.get("radius", 4.2) + 1.5, agent=a)
+        # the centre column: the way down into the candle room (DOT/USD's tape)
+        consider("candles", 0.0, 0.0, self._market_floor() + 8.0, 5.5)
         rx, ry, rz = RETURN_GATE_POS
         consider("leave_market", rx, rz, ry, 5.0)
         return best
@@ -2269,6 +3678,31 @@ class WireGLWidget(QOpenGLWidget):
         n = self._nearest()
         if not n:
             return
+        if self.candles:
+            if n["kind"] == "candle":
+                b = n["bar"]
+                self.candles_sel = b["i"]
+                m = b.get("mood") or {}
+                self._flash(f"bar {b['i']} \u00b7 {b['tstr']} \u00b7 C {b['c']:g}"
+                            + (f" \u00b7 {m.get('word')}" if m.get("word") else ""))
+            elif n["kind"] == "candles_leave":
+                self._leave_candles()
+            return
+        if self.machine:
+            if n["kind"] == "machine_door":
+                d = n["door"]
+                name = machinevision.SERVICE_NAMES.get(d["lport"], "?")
+                who = d.get("proc") or "?"
+                usr = f" ({d['user']})" if d.get("user") else ""
+                self._flash(f"door \u00b7 {d['proto']} :{d['lport']} {name} \u2014 "
+                            f"{who}{usr} listening on {d['laddr']} \u00b7 [{d['state']}]", 5.0)
+            elif n["kind"] == "machine_figure":
+                self._machine_figure_talk(n["fig"])
+            elif n["kind"] == "machine_bird":
+                self._machine_bird_talk(n["bird"])
+            elif n["kind"] == "machine_leave":
+                self._leave_machine()
+            return
         if self.market:
             if n["kind"] == "platform":
                 a = n["agent"]
@@ -2278,6 +3712,8 @@ class WireGLWidget(QOpenGLWidget):
                     self._flash(f"{a['name']} \u2014 {MARKET_STATE_TXT.get(a['state'], a['state'])} "
                                 f"\u00b7 {a.get('mode', '?')} \u00b7 capital {a.get('capital')}")
                 self.agent_selected.emit(a)
+            elif n["kind"] == "candles":
+                self._candles_enter_select()
             elif n["kind"] == "leave_market":
                 self._leave_market()
             return
@@ -2313,6 +3749,8 @@ class WireGLWidget(QOpenGLWidget):
             self._enter_market()
         elif n["kind"] == "word":
             self._enter_word()
+        elif n["kind"] == "machine":
+            self._enter_machine()
         elif n["kind"] == "net":
             self._net_go()
         elif n["kind"] == "heart":
@@ -2364,7 +3802,8 @@ class WireGLWidget(QOpenGLWidget):
                 self._net_result = got
                 self._net_status = self._net_describe(got)
                 self._net_job = None
-        if self.word or self.market or self.exchange or self.deep is not None or not self.world:
+        if self.word or self.market or self.exchange or self.machine or \
+                self.deep is not None or not self.world:
             return
         if self.active != 0:
             return
@@ -2472,8 +3911,8 @@ class WireGLWidget(QOpenGLWidget):
 
     def _exchange_step(self, dt):
         k = self.keys
-        fast = 2.2 if Qt.Key.Key_Shift in k else 1.0
-        spd = 13.0 * fast * dt
+        fast = self._boost()
+        spd = 13.0 * self.move_mult * fast * dt
         cp = math.cos(self.pitch)
         fx, fy, fz = cp * math.sin(self.yaw), math.sin(self.pitch), -cp * math.cos(self.yaw)
         rx, rz = math.cos(self.yaw), math.sin(self.yaw)
@@ -2492,6 +3931,7 @@ class WireGLWidget(QOpenGLWidget):
             dy -= 1.0
         m = math.sqrt(dx * dx + dy * dy + dz * dz)
         if m > 0:
+            self._speed_now = 13.0 * self.move_mult * fast
             self.pos[0] += dx / m * spd
             self.pos[1] += dy / m * spd
             self.pos[2] += dz / m * spd
@@ -3125,6 +4565,10 @@ class WireGLWidget(QOpenGLWidget):
             self._word_sky()
         elif self.exchange:
             self._exchange_sky()
+        elif self.machine:
+            self._machine_sky()
+        elif self.candles:
+            self._candles_sky()
         else:
             self._sky_and_hills(p)
 
@@ -3146,7 +4590,8 @@ class WireGLWidget(QOpenGLWidget):
             self._glyph_rain(now, spin=sp, dim=1.0)
             self._glyph_rain(now, spin=sp + 1.1, dim=0.62)
             self._deep_motes(now)
-        elif not self.word and not self.exchange:
+        elif not self.word and not self.exchange and not self.machine \
+                and not self.candles:
             self._glyph_rain(now)
         if self.market:
             self._draw_market(now)
@@ -3154,6 +4599,10 @@ class WireGLWidget(QOpenGLWidget):
             self._draw_word(now)
         elif self.exchange:
             self._draw_exchange(now)
+        elif self.machine:
+            self._draw_machine(now)
+        elif self.candles:
+            self._draw_candles(now)
         elif self.world and self.deep is None:
             self._ground(p)
             self._well(now)
@@ -3215,9 +4664,13 @@ class WireGLWidget(QOpenGLWidget):
         pr.drawText(px + 10, yy + 48, msg)
         # legend + honesty
         pr.setPen(QColor(150, 190, 180))
-        pr.drawText(14, h_ - 118,
-                    "green = waiting to buy \u00b7 red = waiting to sell \u00b7 "
+        pr.drawText(14, h_ - 134,
+                    "pad green = waiting to buy \u00b7 pad red = waiting to sell \u00b7 "
                     "pulsing red = an exit is firing \u00b7 dim = off")
+        pr.setPen(QColor(170, 220, 175))
+        pr.drawText(14, h_ - 118,
+                    "the floating arrow = the SignalBot's LEAN \u2014 green points up, "
+                    "red points down, amber = flat \u00b7 fly close to read the full interval")
         pr.setPen(QColor(130, 165, 175))
         pr.drawText(14, h_ - 102,
                     "platforms are YOUR trading agents (real config); "
@@ -3246,15 +4699,671 @@ class WireGLWidget(QOpenGLWidget):
             if n0["kind"] == "platform":
                 a = n0["agent"]
                 prompt = f"[E] step onto {a['name']}'s platform \u2014 open its trading settings"
+            elif n0["kind"] == "candles":
+                prompt = "[E] enter the candle room \u2014 DOT/USD's tape, read as a place"
             elif n0["kind"] == "leave_market":
                 prompt = "[E] leave the market \u2014 back to the wire"
             pr.setPen(QColor(255, 215, 120))
             tw = fm.horizontalAdvance(prompt)
             pr.drawText((w_ - tw) // 2, ccy + 46, prompt)
+        # ---- in-world labels (platform names + the SignalBot lean tag) ----
+        for (sx, sy, txt, col) in self._market_labels():
+            if not (0 <= sx <= w_ and 0 <= sy <= h_):
+                continue
+            pr.setPen(QColor(int(col[0] * 255), int(col[1] * 255),
+                             int(col[2] * 255), 230))
+            pr.drawText(int(sx) + 6, int(sy), txt)
+        # ---- the full SignalBot read, floating in the world by each platform -
+        # no menu: fly near a platform and its interval's whole read is laid out
+        # beside it, exactly as the "Run SignalBot now" pane shows it.
+        self._market_signal_panels(pr)
+        if self.candles_select:
+            self._candles_chooser(pr)
         if self._hud_msg and now < self._hud_until:
             pr.setPen(QColor(120, 230, 180))
             tw = fm.horizontalAdvance(self._hud_msg)
             pr.drawText((w_ - tw) // 2, h_ - 40, self._hud_msg)
+
+    def _market_signal_panels(self, pr):
+        """The full per-interval SignalBot read as floating panels in the world,
+        anchored to each platform you are near or standing on. Dressing only —
+        every line is the bot's own snapshot (see wiregate._signal_lines)."""
+        w_, h_ = self.width(), self.height()
+        vp = glGetIntegerv(GL_VIEWPORT)
+        sel = self.selected_agent
+        near_dist = 24.0
+        for a in (self.market_world or {}).get("agents", []):
+            sig = a.get("signal") or {}
+            if not sig.get("available"):
+                continue
+            x, yy, z = a["pos"]
+            try:
+                sx, sy, sz = gluProject(x, yy + 7.6, z)
+            except Exception:
+                continue
+            if sz < 0 or sz > 1:
+                continue
+            dist = math.dist((x, yy, z), tuple(self.pos))
+            if not (dist <= near_dist or a["id"] == sel):
+                continue
+            sxx, syy = sx, vp[3] - sy
+            lean = sig.get("lean") or {}
+            ld = lean.get("dir", "none")
+            rows = [("hdr", f"{a['name']}  \u2014  SignalBot \u00b7 "
+                            f"{sig.get('pair', '?')} @ {sig.get('exchange', '?')} \u00b7 "
+                            f"{sig.get('strategy', '?')} \u00b7 read {sig.get('age', '?')}")]
+            rows.append(("lean", f"LEAN {MARKET_LEAN_TXT.get(ld, ld)}"
+                                 f"  (score {lean.get('score')}: {lean.get('basis')})"))
+            for r in sig.get("reads", []):
+                for ln in r.get("lines", []):
+                    rows.append(("gate" if "strength gate" in ln else "body", ln))
+            pr.setFont(QFont("Monospace", 8))
+            fm = pr.fontMetrics()
+            lh = fm.height() + 1
+            wmax = max((fm.horizontalAdvance(t) for _, t in rows), default=220)
+            wbox = min(640, wmax + 22)
+            hbox = lh * len(rows) + 16
+            bx = min(max(8, int(sxx) + 20), w_ - wbox - 8)
+            by = min(max(8, int(syy) - hbox // 2), h_ - hbox - 8)
+            pr.setPen(Qt.PenStyle.NoPen)
+            pr.setBrush(QColor(8, 16, 22, 208))
+            pr.drawRoundedRect(bx, by, wbox, hbox, 6, 6)
+            pr.setBrush(Qt.BrushStyle.NoBrush)
+            pr.setPen(QPen(QColor(90, 150, 160, 170), 1))
+            pr.drawRoundedRect(bx, by, wbox, hbox, 6, 6)
+            ty = by + 8 + fm.ascent()
+            for kind, t in rows:
+                if kind == "hdr":
+                    pr.setPen(QColor(140, 235, 220))
+                elif kind == "lean":
+                    pr.setPen(QColor(*(int(c * 255) for c in
+                                       MARKET_LEAN_COL.get(ld, MARKET_LEAN_COL["none"]))))
+                elif kind == "gate":
+                    pr.setPen(QColor(255, 205, 120))
+                else:
+                    pr.setPen(QColor(190, 210, 220))
+                pr.drawText(bx + 10, ty, t)
+                ty += lh
+            pr.setFont(QFont("Monospace", 9))
+
+    # ---- the candle room: DOT/USD's tape read as a place --------------------
+    # Entered from the market's centre column. One interval is chosen at the
+    # door; the room is a walk down the tape — one tower per candle, the newest
+    # glowing as it ticks, the market's "feel" painted from SignalBot's own
+    # per-candle rows. Everything is local ground truth (candlevision.py): the
+    # bars are real OHLCV, the read is the bot's own saved row, the room is dressing.
+    def _candles_enter_select(self):
+        opts = candlevision.available()
+        if not opts:
+            self._flash("no candle history on file \u2014 nothing to read yet")
+            return
+        self.candles_select = True
+        self.candles_ivs = opts
+        labels = "  ".join(f"[{i + 1}] {o['interval']}" for i, o in enumerate(opts))
+        self._flash(f"choose an interval for the candle room:  {labels}")
+
+    def _enter_candles(self, iv):
+        try:
+            w = candlevision.build(iv)
+        except Exception as e:
+            self._flash(f"could not open the candle room: {e}")
+            self.candles_select = False
+            self.candles_ivs = []
+            return
+        self.candles_world = w
+        self.candles = True
+        self.candles_select = False
+        self.candles_ivs = []
+        self.candles_sel = None
+        self.market = False
+        self.market_world = None
+        self.word = False
+        self.exchange = False
+        self.machine = False
+        self.service = None
+        self.deep = None
+        self.transition = None
+        self.selected_agent = None
+        self.selected = None
+        self.flying = True
+        self.active = 0
+        g = w["geometry"]
+        self.pos = [g["x1"] + 2.0, g["base_y"] + 8.0, 0.0]
+        self.yaw = -math.pi / 2.0        # stand at the newest bar, look back in time
+        self.pitch = -0.05
+        nowr = w.get("now") or {}
+        tail = f" \u00b7 SignalBot read {nowr.get('age')}" if nowr.get("age") else ""
+        self._flash(f"the candle room \u00b7 {w['pair']} @ {iv} \u00b7 {w['n']} bars "
+                    f"\u00b7 {w['rows_joined']} carry a bot read{tail}")
+        self.candles_changed.emit()
+
+    def _leave_candles(self):
+        was = self.candles
+        self.candles = False
+        self.candles_world = None
+        self.candles_sel = None
+        self.candles_select = False
+        self.candles_ivs = []
+        self.flying = False
+        # back up the column into the market you came from
+        self._enter_market()
+        if self.market:
+            self.pos = [0.0, self._market_floor() + EYE, 9.0]
+            self.yaw = 0.0
+            self.pitch = -0.05
+        if was:
+            self._flash("back in the market \u2014 the candle room is closed")
+        self.candles_changed.emit()
+
+    def refresh_candles(self):
+        """Re-read the candle + row files and rebuild the tape (B inside)."""
+        if not self.candles or not self.candles_world:
+            return
+        iv = self.candles_world.get("interval")
+        try:
+            self.candles_world = candlevision.build(iv)
+        except Exception as e:
+            self._flash(f"candle room rebuild failed: {e}")
+            return
+        w = self.candles_world
+        self._flash(f"candle room rebuilt \u00b7 {w['interval']} \u00b7 {w['n']} bars "
+                    f"\u00b7 fp {w.get('fingerprint')}")
+        self.update()
+
+    def _candles_step(self, dt):
+        k = self.keys
+        fast = self._boost()
+        spd = 13.0 * self.move_mult * fast * dt
+        cp = math.cos(self.pitch)
+        fx, fy, fz = cp * math.sin(self.yaw), math.sin(self.pitch), -cp * math.cos(self.yaw)
+        rx, rz = math.cos(self.yaw), math.sin(self.yaw)
+        dx = dy = dz = 0.0
+        if Qt.Key.Key_W in k:
+            dx += fx; dy += fy; dz += fz
+        if Qt.Key.Key_S in k:
+            dx -= fx; dy -= fy; dz -= fz
+        if Qt.Key.Key_A in k:
+            dx -= rx; dz -= rz
+        if Qt.Key.Key_D in k:
+            dx += rx; dz += rz
+        if Qt.Key.Key_Space in k:
+            dy += 1.0
+        if Qt.Key.Key_C in k:
+            dy -= 1.0
+        m = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if m > 0:
+            self._speed_now = 13.0 * self.move_mult * fast
+            self.pos[0] += dx / m * spd
+            self.pos[1] += dy / m * spd
+            self.pos[2] += dz / m * spd
+        g = (self.candles_world or {}).get("geometry") or {}
+        x0 = g.get("x0", 0.0); xe = g.get("entry_x", g.get("x1", 0.0) + 8.0)
+        floor = g.get("floor_y", CANDLES_FLOOR_Y)
+        self.pos[0] = max(x0 - 16.0, min(xe + 2.0, self.pos[0]))
+        self.pos[2] = max(-15.0, min(15.0, self.pos[2]))
+        self.pos[1] = max(floor + 1.5, min(floor + 72.0, self.pos[1]))
+
+    def _candles_sky(self):
+        glClearColor(0.020, 0.012, 0.030, 1.0)          # a dark violet hall
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        g = (self.candles_world or {}).get("geometry") or {}
+        base = g.get("base_y", CANDLES_FLOOR_Y + 3.0)
+        if self._candle_stars is None:
+            rnd = random.Random(1995 + 11)
+            self._candle_stars = [(rnd.uniform(-20.0, 380.0), base + rnd.uniform(6.0, 96.0),
+                                   rnd.uniform(-70.0, 70.0)) for _ in range(240)]
+        glPointSize(1.0)
+        glColor4f(0.58, 0.64, 0.86, 0.5)
+        glBegin(GL_POINTS)
+        for (sx, sy, sz) in self._candle_stars:
+            glVertex3f(sx, sy, sz)
+        glEnd()
+
+    def _draw_candles(self, t):
+        w = self.candles_world
+        if not w or not w.get("bars"):
+            return
+        g = w["geometry"]
+        y0 = g["floor_y"]; base = g["base_y"]; top = g["top_y"]
+        x0, x1 = g["x0"], g["x1"]
+        # the floor: a long dark slab, faint rails running with the tape
+        glColor4f(0.045, 0.030, 0.062, 1.0)
+        glBegin(GL_QUADS)
+        glVertex3f(x0 - 12, y0, -18); glVertex3f(x1 + 16, y0, -18)
+        glVertex3f(x1 + 16, y0, 18); glVertex3f(x0 - 12, y0, 18)
+        glEnd()
+        glLineWidth(1.0)
+        for rr in (-10.0, -5.0, 5.0, 10.0):
+            glColor4f(0.10, 0.07, 0.145, 1.0)
+            glBegin(GL_LINES)
+            glVertex3f(x0 - 12, y0 + 0.03, rr); glVertex3f(x1 + 16, y0 + 0.03, rr)
+            glEnd()
+        # the floor and roof of the range
+        for yy in (base, top):
+            glColor4f(0.15, 0.16, 0.32, 1.0)
+            glBegin(GL_LINES)
+            glVertex3f(x0, yy, 0.0); glVertex3f(x1, yy, 0.0)
+            glEnd()
+        # the bars: one tower per candle, wick to the true high/low, mood at its foot
+        for b in w["bars"]:
+            up = b["c"] >= b["o"]
+            base_col = CANDLE_UP if up else CANDLE_DOWN
+            hasrow = b.get("row") is not None
+            col = base_col if hasrow else tuple(c * 0.60 for c in base_col)
+            lo, hi = min(b["y_open"], b["y_close"]), max(b["y_open"], b["y_close"])
+            if hi - lo < 0.05:
+                hi = lo + 0.05
+            self._cube(b["x"], (lo + hi) / 2.0, 0.0, 0.30, hi - lo, 0.42, col)
+            glColor4f(min(1.0, col[0] * 1.08), min(1.0, col[1] * 1.08),
+                      min(1.0, col[2] * 1.08), 1.0)
+            glLineWidth(1.3)
+            glBegin(GL_LINES)
+            glVertex3f(b["x"], b["y_low"], 0.0); glVertex3f(b["x"], b["y_high"], 0.0)
+            glEnd()
+            m = b.get("mood")
+            if m:
+                mc = m["col"]
+                glColor4f(mc[0], mc[1], mc[2], 0.55 if hasrow else 0.26)
+                glBegin(GL_QUADS)
+                glVertex3f(b["x"] - 0.20, y0 + 0.05, -0.20)
+                glVertex3f(b["x"] + 0.20, y0 + 0.05, -0.20)
+                glVertex3f(b["x"] + 0.20, y0 + 0.05, 0.20)
+                glVertex3f(b["x"] - 0.20, y0 + 0.05, 0.20)
+                glEnd()
+        glLineWidth(1.0)
+        # the close line: one polyline through every close
+        glColor4f(0.86, 0.86, 1.0, 0.32)
+        glBegin(GL_LINE_STRIP)
+        for b in w["bars"]:
+            glVertex3f(b["x"], b["y_close"], 0.0)
+        glEnd()
+        # the newest bar: the live one, breathing a halo of light
+        nb = w["bars"][-1]
+        pulse = 1.0 + 0.25 * math.sin(t * 4.0)
+        mid = (nb["y_open"] + nb["y_close"]) / 2.0
+        glColor4f(0.98, 0.82, 0.38, 0.18)
+        glBegin(GL_TRIANGLE_FAN)
+        glVertex3f(nb["x"], mid, 0.0)
+        for i in range(25):
+            aa = 2 * math.pi * i / 24
+            glVertex3f(nb["x"] + 1.3 * pulse * math.cos(aa),
+                       mid + 2.6 * pulse * math.sin(aa), 0.0)
+        glEnd()
+        self._octa(nb["x"], top + 3.0, 0.0, 0.5, CANDLE_AMBER)
+        # the selected bar, ringed
+        if self.candles_sel is not None and 0 <= self.candles_sel < len(w["bars"]):
+            b = w["bars"][self.candles_sel]
+            bm = (min(b["y_open"], b["y_close"]) + max(b["y_open"], b["y_close"])) / 2.0
+            self._vring(b["x"], bm, 0.0, 1.9, (1.0, 1.0, 1.0), t)
+        # lights strung along the tape's spine (dressing)
+        for j in range(int(x0), int(x1) + 1, 12):
+            lum = 0.4 + 0.25 * math.sin(t * 1.6 + j * 0.3)
+            glColor4f(lum, 0.55 * lum, 0.30 * lum, 0.5)
+            self._octa(float(j), top + 6.0, 0.0, 0.22, (lum, 0.55 * lum, 0.30 * lum))
+        # the way back: the entrance portal at the newest end
+        self._vring(g["entry_x"], base + 3.4, 0.0, 3.2, (0.85, 0.45, 0.95), t + 0.6)
+        self._vring(g["entry_x"], base + 3.4, 0.0, 2.1, (0.60, 0.30, 0.75), t + 1.6)
+
+    def _nearest_candles(self):
+        w = self.candles_world
+        if not w or not w.get("bars"):
+            return None
+        px, py, pz = self.pos
+        g = w["geometry"]
+        best = None
+        dl = math.hypot(px - g["entry_x"], pz)
+        if dl <= 5.5:
+            best = {"kind": "candles_leave", "d": dl}
+        for b in w["bars"]:
+            dx = abs(px - b["x"])
+            if dx > 2.4 or abs(pz) > 12.0:
+                continue
+            if abs(py - (b["y_high"] + b["y_low"]) / 2.0) > 16.0:
+                continue
+            if best is None or dx < best["d"]:
+                best = {"kind": "candle", "d": dx, "bar": b, "index": b["i"]}
+        return best
+
+    def _candles_labels(self):
+        out = []
+        w = self.candles_world
+        if not w or not w.get("bars"):
+            return out
+        vp = glGetIntegerv(GL_VIEWPORT)
+        px = self.pos[0]
+        g = w["geometry"]
+        near = sorted(w["bars"], key=lambda b: abs(b["x"] - px))[:28]
+        for b in near:
+            if abs(b["x"] - px) > 30.0:
+                continue
+            try:
+                sx, sy, sz = gluProject(b["x"], b["y_high"] + 1.3, 0.0)
+            except Exception:
+                continue
+            if sz < 0 or sz > 1:
+                continue
+            m = b.get("mood") or {}
+            glyph = "\u25b2" if b["c"] >= b["o"] else "\u25bc"
+            out.append((sx, vp[3] - sy, f"{b['tstr'][5:16]} \u00b7 {glyph}{b['c']:g}",
+                        m.get("col", CANDLE_GREY)))
+        try:
+            sx, sy, sz = gluProject(g["entry_x"], g["base_y"] + 4.2, 0.0)
+            if 0 <= sz <= 1:
+                out.append((sx, vp[3] - sy, "leave the candle room [E] \u2014 back to the market",
+                            (0.90, 0.72, 0.98)))
+        except Exception:
+            pass
+        return out
+
+    def _candles_panel(self, pr):
+        """The full read of one bar, floating beside it in the world — the bar's
+        real OHLCV and, where the bot left one, its own row for that candle."""
+        w = self.candles_world
+        if not w or not w.get("bars"):
+            return
+        idx = self.candles_sel
+        if idx is None:
+            n = self._nearest_candles()
+            if not n or n["kind"] != "candle":
+                return
+            idx = n["index"]
+        if not (0 <= idx < len(w["bars"])):
+            return
+        b = w["bars"][idx]
+        vp = glGetIntegerv(GL_VIEWPORT)
+        ymid = (min(b["y_open"], b["y_close"]) + max(b["y_open"], b["y_close"])) / 2.0
+        try:
+            sx, sy, sz = gluProject(b["x"], ymid, 0.0)
+        except Exception:
+            return
+        if sz < 0 or sz > 1:
+            return
+        m = b.get("mood") or {}
+        r = b.get("row")
+
+        def _p(x):
+            return "\u2014" if x is None else f"{x:+.2f}%"
+        rows = [("hdr", f"bar {b['i']} \u00b7 {b['tstr']} \u00b7 {w['pair']} @ {w['interval']}"),
+                ("ohlc", f"O {b['o']:g}  H {b['h']:g}  L {b['l']:g}  C {b['c']:g}  "
+                         f"V {b['v']:,.0f}"),
+                ("mood", f"the feel: {m.get('word', '?')}  ({m.get('after', '')})")]
+        if r:
+            rows.append(("bot", f"bot read: range {r.get('rangeSignal')} \u00b7 zone "
+                                f"{r.get('zone')} \u00b7 strength "
+                                f"{round(r.get('strength') or 0, 3)} "
+                                f"{r.get('strengthDirection')}"))
+            rows.append(("bot", f"MAs short {r.get('shortMA')} long {r.get('longMA')} "
+                                f"\u00b7 spread {r.get('maSpreadPct')}% \u00b7 trend {r.get('trend')}"))
+            rows.append(("bot", f"band lower {r.get('lowerBand')} upper {r.get('upperBand')} "
+                                f"\u00b7 support {r.get('nearestSupportPct')}% "
+                                f"({r.get('supportTouches')} touches)"))
+            rows.append(("next", f"what happened next: 1 {_p(r.get('return1'))} \u00b7 "
+                                 f"3 {_p(r.get('return3'))} \u00b7 5 {_p(r.get('return5'))} \u00b7 "
+                                 f"10 {_p(r.get('return10'))} \u00b7 20 {_p(r.get('return20'))}"))
+            rows.append(("next", f"excursion 5: mfe {_p(r.get('mfe5'))} mae {_p(r.get('mae5'))}"))
+        else:
+            rows.append(("dim", "no bot row joined to this bar (lookback warmup, or an older dump)"))
+        rows.append(("dim", "bar = observed (real OHLCV) \u00b7 feel = the bot's own row, "
+                            "or the bar's shape"))
+
+        pr.setFont(QFont("Monospace", 8))
+        fm = pr.fontMetrics()
+        lh = fm.height() + 1
+        wmax = max((fm.horizontalAdvance(t) for _, t in rows), default=220)
+        wbox = min(self.width() - 16, wmax + 22)
+        hbox = lh * len(rows) + 16
+        sxx, syy = sx, vp[3] - sy
+        bx = min(max(8, int(sxx) + 20), self.width() - wbox - 8)
+        by = min(max(8, int(syy) - hbox // 2), self.height() - hbox - 8)
+        pr.setPen(Qt.PenStyle.NoPen)
+        pr.setBrush(QColor(24, 14, 26, 212))
+        pr.drawRoundedRect(bx, by, wbox, hbox, 6, 6)
+        pr.setBrush(Qt.BrushStyle.NoBrush)
+        pr.setPen(QPen(QColor(170, 120, 150, 170), 1))
+        pr.drawRoundedRect(bx, by, wbox, hbox, 6, 6)
+        ty = by + 8 + fm.ascent()
+        for kind, txt in rows:
+            if kind == "hdr":
+                pr.setPen(QColor(245, 205, 150))
+            elif kind == "ohlc":
+                pr.setPen(QColor(210, 205, 225))
+            elif kind == "mood":
+                pr.setPen(QColor(*(int(c * 255) for c in m.get("col", CANDLE_GREY))))
+            elif kind == "bot":
+                pr.setPen(QColor(170, 220, 200))
+            elif kind == "next":
+                pr.setPen(QColor(200, 190, 235))
+            else:
+                pr.setPen(QColor(150, 140, 165))
+            pr.drawText(bx + 10, ty, txt)
+            ty += lh
+        pr.setFont(QFont("Monospace", 9))
+
+    def _candles_chooser(self, pr):
+        """The interval chooser at the candle room's door: one number per tape."""
+        w_, h_ = self.width(), self.height()
+        fm = pr.fontMetrics()
+        rows = ["ENTER THE CANDLE ROOM",
+                "choose an interval for DOT/USD \u2014 blackhorse's own tape:",
+                ""]
+        for i, o in enumerate(self.candles_ivs):
+            rows.append(f"   [{i + 1}]   {o['interval']:>5}    {o['bars']} bars  \u00b7  "
+                        f"{o['rows']} bot rows  \u00b7  dumped {o['age']}")
+        rows.append("")
+        rows.append(f"press 1\u2013{len(self.candles_ivs)} to enter  \u00b7  Esc to cancel")
+        lh = fm.height() + 2
+        wbox = min(w_ - 60, 560)
+        hbox = lh * len(rows) + 26
+        bx = (w_ - wbox) // 2
+        by = (h_ - hbox) // 2
+        pr.setPen(Qt.PenStyle.NoPen)
+        pr.setBrush(QColor(20, 12, 24, 230))
+        pr.drawRoundedRect(bx, by, wbox, hbox, 10, 10)
+        pr.setBrush(Qt.BrushStyle.NoBrush)
+        pr.setPen(QPen(QColor(200, 150, 120, 200), 1))
+        pr.drawRoundedRect(bx, by, wbox, hbox, 10, 10)
+        ty = by + 14 + fm.ascent()
+        for i, line in enumerate(rows):
+            if i == 0:
+                pr.setPen(QColor(255, 210, 150))
+            elif i == 1:
+                pr.setPen(QColor(190, 170, 190))
+            elif line.startswith("press"):
+                pr.setPen(QColor(160, 220, 180))
+            else:
+                pr.setPen(QColor(220, 205, 220))
+            pr.drawText(bx + 16, ty, line)
+            ty += lh
+
+    def _hud_candles(self, pr, now):
+        w_, h_ = self.width(), self.height()
+        f = QFont("Monospace", 9)
+        pr.setFont(f)
+        fm = pr.fontMetrics()
+        w = self.candles_world or {}
+        pr.setPen(QColor(235, 190, 140))
+        pr.drawText(14, 22, "SECTION 9  //  WIRE VISION  \u2014  THE CANDLE ROOM")
+        pr.setPen(QColor(150, 120, 145))
+        pr.drawText(14, 36, "the tape read as a place \u00b7 DOT/USD, drawn from "
+                            "blackhorse's own candle + SignalBot files")
+        pr.setPen(QColor(210, 200, 220))
+        pr.drawText(14, 52, f"you are in the candle room   [{w.get('interval', '?')}]")
+        # the current SignalBot read (the "now" at the newest bar)
+        nowr = w.get("now") or {}
+        if nowr:
+            px = w_ - 330
+            pr.setPen(Qt.PenStyle.NoPen)
+            pr.setBrush(QColor(26, 16, 28, 200))
+            pr.drawRoundedRect(px, 30, 320, 86, 6, 6)
+            pr.setBrush(Qt.BrushStyle.NoBrush)
+            pr.setPen(QColor(240, 205, 160))
+            pr.drawText(px + 10, 46, f"SIGNALBOT NOW \u00b7 {nowr.get('channel', '?')} "
+                                      f"\u00b7 {nowr.get('interval', '?')}")
+            pr.setPen(QColor(205, 195, 215))
+            pr.drawText(px + 10, 62, f"{nowr.get('action')}  conf={nowr.get('confidence')}  "
+                                     f"str={round(nowr.get('strength') or 0, 3)} "
+                                     f"{nowr.get('strength_direction')}")
+            pr.drawText(px + 10, 78, f"trend {nowr.get('trend')} \u00b7 RSI {nowr.get('rsi')} "
+                                     f"\u00b7 range {nowr.get('range_signal')}")
+            pr.setPen(QColor(165, 150, 180))
+            pr.drawText(px + 10, 94, f"read {nowr.get('age')} \u00b7 {nowr.get('pair')} "
+                                     f"@ {nowr.get('exchange')}")
+        # legend + honesty
+        pr.setPen(QColor(220, 180, 150))
+        pr.drawText(14, h_ - 118, "green bar = close above open \u00b7 red = close below "
+                                  "\u00b7 the wick spans the true high/low")
+        pr.setPen(QColor(180, 170, 200))
+        pr.drawText(14, h_ - 102, "the light under a bar = SignalBot's own read of it: "
+                                  "its strength, its range signal, what happened next")
+        hs = candlevision.honesty()
+        pr.setPen(QColor(140, 135, 160))
+        pr.drawText(14, h_ - 86, hs["real"][:158])
+        pr.drawText(14, h_ - 70, hs["feels"][:158])
+        pr.setPen(QColor(235, 190, 140))
+        pr.drawText(14, h_ - 50, "WASD fly \u00b7 Space/C up/down \u00b7 E read a bar "
+                                 "\u00b7 B rebuild \u00b7 Home leave the room")
+        # crosshair
+        n0 = self._nearest()
+        ccx, ccy = w_ // 2, h_ // 2
+        pr.setPen(QPen(QColor(255, 185, 40, 235) if n0 else QColor(220, 150, 180, 190), 2))
+        for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+            pr.drawLine(ccx + dx * 18, ccy + dy * 18, ccx + dx * 18 + dx * 12, ccy + dy * 18)
+            pr.drawLine(ccx + dx * 18, ccy + dy * 18, ccx + dx * 18, ccy + dy * 18 + dy * 12)
+        prompt = ""
+        if n0 and n0["kind"] == "candle":
+            prompt = f"[E] read bar {n0['index']} \u00b7 {n0['bar']['tstr']}"
+        elif n0 and n0["kind"] == "candles_leave":
+            prompt = "[E] leave the candle room \u2014 back to the market"
+        if prompt:
+            pr.setPen(QColor(255, 225, 160))
+            tw = fm.horizontalAdvance(prompt)
+            pr.drawText((w_ - tw) // 2, ccy + 46, prompt)
+        # in-world labels + the bar panel
+        for (sx, sy, txt, col) in self._candles_labels():
+            if not (0 <= sx <= w_ and 0 <= sy <= h_):
+                continue
+            pr.setPen(QColor(int(col[0] * 255), int(col[1] * 255), int(col[2] * 255), 230))
+            pr.drawText(int(sx) + 6, int(sy), txt)
+        self._candles_panel(pr)
+        if self._hud_msg and now < self._hud_until:
+            pr.setPen(QColor(235, 190, 140))
+            tw = fm.horizontalAdvance(self._hud_msg)
+            pr.drawText((w_ - tw) // 2, h_ - 40, self._hud_msg)
+
+    def _hud_machine(self, pr: QPainter, now):
+        w_, h_ = self.width(), self.height()
+        mono = QFont("Monospace", 9)
+        pr.setFont(mono)
+        fm = pr.fontMetrics()
+        w = self.machine_world or {}
+        h = w.get("host", {})
+        c = w.get("counts", {})
+        # ---- header: the machine, and what it is (and is not) ----
+        pr.setPen(QColor(140, 235, 170))
+        pr.drawText(14, 22, f"SECTION 16  //  WIRE VISION  \u2014  THE MACHINE  \u00b7  "
+                            f"{h.get('name', '?')}")
+        pr.setPen(QColor(105, 170, 135))
+        pr.drawText(14, 36, "this is THIS machine, read live from /proc and the local "
+                            "logs \u2014 not the network, not a scan, a memory of nothing")
+        pr.drawText(14, 50, "observed: a pid, a socket, a port, a path \u00b7 "
+                            "inferred: the program's meaning, a dark figure's intent")
+        # counts (top-right)
+        xr = "on" if self.machine_xray else "off"
+        pr.setPen(QColor(150, 200, 170))
+        msg = (f"doors {c.get('doors', 0)} \u00b7 roads {c.get('roads', 0)} \u00b7 "
+               f"inhabitants {c.get('inhabitants', 0)} \u00b7 dark figures {c.get('figures', 0)}")
+        pr.drawText(w_ - fm.horizontalAdvance(msg) - 14, 22, msg)
+        tail = (f"kernel {h.get('kernel', '?')} \u00b7 up {h.get('uptime', '?')} \u00b7 "
+                f"x-ray [X] {xr}")
+        pr.setPen(QColor(150, 200, 170))
+        pr.drawText(w_ - fm.horizontalAdvance(tail[:118]) - 14, 38, tail[:118])
+
+        if not c.get("figures"):
+            pr.setPen(QColor(120, 200, 150))
+            pr.drawText(14, 68, "no dark figures in this field \u2014 nothing local reads "
+                                "as an intruder in the files (the wire is quiet)")
+
+        # ---- the birds: read-only, or armed (finch's hand live) ----
+        armed = self.machine_birds_armed
+        birds = w.get("birds", [])
+        pr.setPen(QColor(255, 150, 120) if armed else QColor(140, 200, 230))
+        state = "ARMED \u2014 finch may contain (host-local only)" if armed else \
+                "read-only \u00b7 press K to arm"
+        held = f" \u00b7 {len(self._machine_contained)} held [L]" if self._machine_contained else ""
+        pr.drawText(14, 84, f"BIRDS \u00b7 crow / finch / raven \u2014 {state}{held}")
+        bx = 14
+        for b in birds:
+            k = b.get("kind")
+            if k == "crow":
+                s = f"crow: {b.get('age', '?')}"
+            elif k == "finch":
+                s = (f"finch: {b.get('quarantine_files')} held"
+                     + (" \u2588" if armed else ""))
+            else:
+                s = f"raven: up={b.get('up')}"
+            pr.setPen(QColor(*[int(v * 255) for v in BIRD_COL.get(k, (0.8, 0.8, 0.9))]))
+            pr.drawText(bx, 98, s)
+            bx += fm.horizontalAdvance(s) + 22
+
+        # ---- auto-defend (Phase 3): finch detects & contains on its own ----
+        auto = self.machine_autoguard
+        pr.setPen(QColor(255, 190, 90) if auto else QColor(120, 140, 160))
+        a_on = "ON \u2014 finch finds & contains by itself (host-local, observed figures only)"
+        pr.drawText(14, 112, f"AUTO-DEFEND [M] \u00b7 {a_on if auto else 'off \u2014 finch waits for E'}")
+
+        # ---- live vision (the knob): what the counters actually say right now ----
+        live = self._live_line()
+        pr.setPen(QColor(140, 220, 190) if self.live_effective != "off"
+                  else QColor(110, 130, 150))
+        pr.drawText(14, 126, live)
+
+        # ---- in-world labels over the doors, figures and the core ----
+        pr.setFont(mono)
+        for (sx, sy, txt, col) in self._machine_labels():
+            if not (0 <= sx <= w_ and 0 <= sy <= h_):
+                continue
+            pr.setPen(QColor(int(col[0] * 255), int(col[1] * 255),
+                             int(col[2] * 255), 225))
+            pr.drawText(int(sx) + 6, int(sy), txt)
+
+        # ---- prompt at whatever you are standing in ----
+        n0 = self._nearest()
+        fm = pr.fontMetrics()
+        if n0:
+            kind = n0["kind"]
+            if kind == "machine_door":
+                d = n0["door"]
+                name = machinevision.SERVICE_NAMES.get(d["lport"], "?")
+                prompt = (f"[E] {d['proto']} :{d['lport']} {name} \u2014 "
+                          f"{d.get('proc') or 'unknown program'}")
+            elif kind == "machine_figure":
+                f = n0["fig"]
+                ip = str(f.get("src") or "")
+                conf = self._machine_contain_confirm
+                if self.machine_birds_armed and ip in self._machine_contained:
+                    prompt = f"[E] dark figure \u00b7 {f['kind']} \u00b7 {ip} \u2014 HELD (L releases)"
+                elif self.machine_birds_armed and conf and conf[0] == ip and now < conf[1]:
+                    prompt = f"[E] CONFIRM \u2014 finch contains {ip} (host-local DROP)"
+                elif self.machine_birds_armed:
+                    ok, why = birdguard.usable(ip)
+                    prompt = (f"[E] finch: contain {ip}" if ok else f"finch can't contain {ip} \u2014 {why}")
+                else:
+                    prompt = f"[E] dark figure \u00b7 {f['kind']} \u00b7 {ip} \u00b7 {f['confidence']}"
+            elif kind == "machine_bird":
+                b = n0["bird"]
+                prompt = f"[E] {b['kind']} \u00b7 {b.get('role', '')} \u2014 read what it found"
+            elif kind == "machine_leave":
+                prompt = "[E] up the hatch \u2014 back to the wire"
+            else:
+                prompt = ""
+            if prompt:
+                pr.setPen(QColor(255, 215, 120))
+                tw = fm.horizontalAdvance(prompt)
+                pr.drawText((w_ - tw) // 2, h_ - 46, prompt)
+        if self._hud_msg and now < self._hud_until:
+            pr.setPen(QColor(120, 230, 180))
+            tw = fm.horizontalAdvance(self._hud_msg)
+            pr.drawText((w_ - tw) // 2, h_ - 30, self._hud_msg)
 
     def _hud_word(self, pr: QPainter, now):
         w_, h_ = self.width(), self.height()
@@ -3466,6 +5575,37 @@ class WireGLWidget(QOpenGLWidget):
                     "WASD fly \u00b7 Space/C up/down \u00b7 fly to a star, E to open "
                     "\u00b7 R a random chapter \u00b7 Home leave the room")
 
+    def _speed_lines(self, pr: QPainter, now, w_, h_):
+        """Radial motion lines that streak past the camera the faster you move —
+        sprint on the floor, boost in flight. Thresholded on the speed you are
+        actually carrying, so they only ever appear when you are really moving.
+        Atmosphere only."""
+        v = self._speed_now
+        v0, v1 = 18.0, 62.0
+        if v <= v0 or not self._speedlines:
+            return
+        inten = min(1.0, (v - v0) / (v1 - v0))
+        cx, cy = w_ * 0.5, h_ * 0.5
+        rmax = math.hypot(cx, cy)
+        rmin = min(w_, h_) * 0.15
+        span = rmax - rmin
+        n = int(len(self._speedlines) * (0.22 + 0.78 * inten))
+        for i in range(n):
+            a, rate, ln, ph, lw = self._speedlines[i]
+            t = (now * rate * (1.1 + 1.4 * inten) + ph) % 1.0
+            r0 = rmin + t * span
+            r1 = r0 + ln * span * (0.55 + 0.9 * inten)
+            ca, sa = math.cos(a), math.sin(a)
+            alpha = int(215 * inten * (1.0 - 0.5 * t))
+            if alpha <= 4:
+                continue
+            pen = QPen(QColor(206, 248, 255, min(255, alpha)))
+            pen.setWidthF(lw)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pr.setPen(pen)
+            pr.drawLine(int(cx + ca * r0), int(cy + sa * r0),
+                        int(cx + ca * r1), int(cy + sa * r1))
+
     def _hud(self, pr: QPainter, now, key):
         w_, h_ = self.width(), self.height()
         f = QFont("Monospace", 9)
@@ -3482,6 +5622,21 @@ class WireGLWidget(QOpenGLWidget):
         for yy in range(0, h_, 3):
             pr.drawLine(0, yy, w_, yy)
 
+        # ---- the streaks of speed: only when you are really moving ----
+        self._speed_lines(pr, now, w_, h_)
+        if self._speed_now > 1.0:
+            tag = f"{self._speed_now:4.0f} u/s"
+            if self._boost() > 1.0:
+                tag += f"   \u26a1 \u00d7{self.boost_mult:g}"
+            pr.setPen(QColor(150, 225, 245, 225))
+            pr.drawText(14, h_ - 14, tag)
+        if not self._looklocked:
+            hint = ("click to look around  \u00b7  move the mouse to turn  \u00b7  "
+                    "Esc or right-click frees it")
+            pr.setPen(QColor(150, 205, 220, 195))
+            tw = QFontMetrics(f).horizontalAdvance(hint)
+            pr.drawText(max(14, (w_ - tw) // 2), h_ - 34, hint)
+
         # ---- the market: blackhorse, reached through the gate on the wire ----
         if self.market:
             self._hud_market(pr, now)
@@ -3495,6 +5650,16 @@ class WireGLWidget(QOpenGLWidget):
         # ---- the Exchange: the hall of gates out on the net ----
         if self.exchange:
             self._hud_exchange(pr, now)
+            return
+
+        # ---- the machine: the box under your feet, read live from /proc ----
+        if self.machine:
+            self._hud_machine(pr, now)
+            return
+
+        # ---- the candle room: DOT/USD's tape, read as a place ----
+        if self.candles:
+            self._hud_candles(pr, now)
             return
 
         # ---- the open sea below the edge: unbounded, honest, carrying no data ----
@@ -3646,12 +5811,19 @@ class WireGLWidget(QOpenGLWidget):
     # ---- lifecycle ---------------------------------------------------------
     def shutdown(self):
         self._timer.stop()
+        try:
+            self._live_timer.stop()
+            self._auto_timer.stop()
+            self._stop_capture()
+        except Exception:
+            pass
 
 
 class WireVisionTab(QWidget):
     """The 'Vision' tab: the playable wire + a live codex side panel."""
 
     fullscreen_changed = pyqtSignal(bool)      # so the host window can hide its chrome
+    close_requested = pyqtSignal()             # the menu's "Close Mr.Fluffy"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3663,13 +5835,26 @@ class WireVisionTab(QWidget):
         bar = QHBoxLayout()
         self.b_build = QPushButton("Build the wire")
         self.b_build.setToolTip("Read the local ground truth and rebuild the playable world (no network, no brain)")
+        self.b_machine = QPushButton("\u29c9 the machine")
+        self.b_machine.setToolTip("Step down into THIS host \u2014 its doors, roads and "
+                                  "inhabitants read live from /proc and the local logs "
+                                  "(also: the hatch on the wire floor, due +z)")
         self.cb_real = QCheckBox("show real names")
         self.cb_real.setToolTip("Reveal the technical term for every place (level the field)")
+        self.cb_live = QComboBox()
+        for _m, _lab in (("auto", "live: auto"), ("off", "live: off (snapshot)"),
+                         ("delta", "live: delta (cheap)"),
+                         ("capture", "live: capture (heavy)")):
+            self.cb_live.addItem(_lab, _m)
+        self.cb_live.setToolTip("How live the machine room is. 'auto' benchmarks THIS "
+                                "host once and picks off / delta / capture for it.")
         self.b_full = QPushButton("\u26f6 full screen")
         self.b_full.setToolTip("Give Wire Vision the whole screen (F11) \u2014 hides the "
                                "panels, keeps the world")
         self.where = QLabel("not built yet — click 'Build the wire'")
         bar.addWidget(self.b_build)
+        bar.addWidget(self.b_machine)
+        bar.addWidget(self.cb_live)
         bar.addWidget(self.cb_real)
         bar.addWidget(self.b_full)
         bar.addWidget(self.where, 1)
@@ -3778,6 +5963,38 @@ class WireVisionTab(QWidget):
         self.fs_exit.clicked.connect(lambda: self.toggle_fullscreen(False))
         self.deck.add_overlay(self.fs_exit, "top-center")
 
+        # the game menu — one popup with Settings, Controls, Resume and a way out
+        self.menu_btn = QPushButton("\u2630 menu")
+        self.menu_btn.setToolTip("The game menu \u2014 settings, controls, and a way out (Tab)")
+        self.menu_btn.setStyleSheet(
+            "QPushButton{background:rgba(20,34,40,225);color:#8be0ff;"
+            "border:1px solid #2a4a55;border-radius:4px;padding:6px 12px;}"
+            "QPushButton:hover{background:rgba(32,56,66,240);}")
+        self.menu_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.menu_btn.clicked.connect(self._open_game_menu)
+        self.deck.add_overlay(self.menu_btn, "top-left")
+
+        self.game_menu = _GameMenu()
+        self.game_menu.setObjectName("gameMenu")
+        self.game_menu.setFixedWidth(470)
+        self.game_menu.setStyleSheet(
+            "QFrame#gameMenu{border:1px solid #2a4a55;border-radius:10px;"
+            "background:rgba(8,16,20,245);}"
+            "QFrame#gameMenu QLabel{color:#cfe3dd;background:transparent;}"
+            "QFrame#gameMenu QPushButton{background:#12303a;border:1px solid #2a4a55;"
+            "border-radius:4px;padding:6px 10px;color:#cfe3dd;}"
+            "QFrame#gameMenu QPushButton:hover{background:#1b4652;}"
+            "QFrame#gameMenu QDoubleSpinBox,QFrame#gameMenu QComboBox{"
+            "background:#0a1216;color:#cfe3dd;border:1px solid #2a4a55;"
+            "border-radius:4px;padding:2px;}")
+        self.game_menu.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.game_menu.setVisible(False)
+        self._gm_body = QVBoxLayout(self.game_menu)
+        self._gm_body.setContentsMargins(14, 12, 14, 12)
+        self._gm_body.setSpacing(8)
+        self.game_menu.escape.connect(self._close_game_menu)
+        self.deck.add_overlay(self.game_menu, "center")
+
         # quick travel + actions for a reader who does not want to fly to a gate
         self.word_bar = QWidget()
         wbl = QHBoxLayout(self.word_bar)
@@ -3815,8 +6032,14 @@ class WireVisionTab(QWidget):
         self.gl.menu_toggle.connect(self._toggle_menu)
         self.gl.fullscreen_request.connect(self.toggle_fullscreen)
         self.gl.escape_request.connect(self._escape_fullscreen)
+        self.gl.menu_request.connect(self._toggle_game_menu)
         self.gl.word_changed.connect(self._refresh_word_ui)
         self.gl.web_changed.connect(self._refresh_word_ui)
+        self.gl.machine_changed.connect(self._refresh_machine_ui)
+        self.gl.live_changed.connect(self._refresh_live_ui)
+        self.cb_live.currentIndexChanged.connect(self._on_live_change)
+        self._refresh_live_ui(self.gl.live_mode, self.gl.live_effective)
+        self.b_machine.clicked.connect(self._machine_btn)
         self.bw_prev.clicked.connect(lambda: self._word_btn(self.gl.word_prev))
         self.bw_next.clicked.connect(lambda: self._word_btn(self.gl.word_next))
         self.bw_chapters.clicked.connect(lambda: self._word_btn(self.gl.word_back_to_chapters))
@@ -3851,13 +6074,247 @@ class WireVisionTab(QWidget):
             else:
                 win.showNormal()
         self.fullscreen_changed.emit(self._fs)
-        self.deck.place_overlays()
+        self._reflow_overlays()
         self.gl.setFocus()
 
     def _escape_fullscreen(self):
         """Esc always gets you out of full screen — never stuck."""
         if self._fs:
             self.toggle_fullscreen(False)
+
+    # ---- the game menu: Settings / Controls / Resume / Close ----------------
+    def _open_game_menu(self):
+        if self.game_menu.isVisible():
+            self._close_game_menu()
+            return
+        self._gm_home()
+        self.game_menu.setVisible(True)
+        try:
+            self.gl.keys.clear()      # stop any held movement while the menu is up
+            self.gl.set_look_lock(False)    # free the mouse so the widgets are usable
+        except Exception:
+            pass
+        self._reflow_overlays()
+        self.game_menu.setFocus()
+
+    def _close_game_menu(self):
+        if not self.game_menu.isVisible():
+            return
+        self.game_menu.setVisible(False)
+        self._reflow_overlays()
+        self.gl.setFocus()
+        try:
+            self.gl.set_look_lock(True)     # back to smooth look as you resume
+        except Exception:
+            pass
+
+    def _toggle_game_menu(self):
+        if self.game_menu.isVisible():
+            self._close_game_menu()
+        else:
+            self._open_game_menu()
+
+    def _reflow_overlays(self):
+        """An overlay floats over a QOpenGLWidget. After showing, hiding, or
+        resizing one, nudge the whole stack so it composes at once \u2014 otherwise the
+        new content only appears the next time the window is resized."""
+        lay = self.game_menu.layout()
+        if lay is not None:
+            lay.activate()          # settle the frame's height before we place it
+        self.deck.place_overlays()
+        self.game_menu.update()
+        self.menu_btn.update()
+        self.deck.update()
+        self.gl.update()
+        win = self.window()
+        if win is not None:
+            win.update()
+        # child size hints are only final once they are polished, which happens on
+        # the next event-loop turn — re-place then so a freshly-switched menu page
+        # is sized right at once (no resize nudge needed).
+        QTimer.singleShot(0, self.deck.place_overlays)
+
+    def _gm_clear(self):
+        self._gm_clear_layout(self._gm_body)
+
+    def _gm_clear_layout(self, lay):
+        while lay.count():
+            it = lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+            else:
+                sub = it.layout()
+                if sub is not None:
+                    self._gm_clear_layout(sub)
+
+    def _gm_row(self, label, widget):
+        row = QHBoxLayout()
+        lab = QLabel(label)
+        lab.setMinimumWidth(150)
+        row.addWidget(lab)
+        row.addWidget(widget, 1)
+        self._gm_body.addLayout(row)
+
+    def _gm_title(self, text, sub=""):
+        t = QLabel(text)
+        t.setStyleSheet("color:#8be0ff;font-weight:bold;")
+        self._gm_body.addWidget(t)
+        if sub:
+            s = QLabel(sub)
+            s.setWordWrap(True)
+            s.setStyleSheet("color:#9aa;")
+            self._gm_body.addWidget(s)
+
+    def _gm_home(self):
+        self._gm_clear()
+        self._gm_title("MR.FLUFFY \u2014 the wire",
+                       "You are in the wire. Fly it, read it, live it.")
+        for label, slot in (("Resume \u2014 back to the wire", self._close_game_menu),
+                            ("\u2699  Settings", self._gm_settings),
+                            ("\u2328  Controls \u2014 every key", self._gm_controls),
+                            ("\u26f6  Toggle full screen", self.toggle_fullscreen)):
+            b = QPushButton(label)
+            b.clicked.connect(lambda _=False, s=slot: s())
+            self._gm_body.addWidget(b)
+        close = QPushButton("\u2716  Close Mr.Fluffy")
+        close.setStyleSheet(
+            "QFrame#gameMenu QPushButton{background:#3a1622;border:1px solid #6a2a3a;"
+            "border-radius:4px;padding:6px 10px;color:#ffb4c4;}"
+            "QFrame#gameMenu QPushButton:hover{background:#4a1c2c;}")
+        close.clicked.connect(self.close_requested.emit)
+        self._gm_body.addWidget(close)
+        self._reflow_overlays()
+
+    def _gm_settings(self):
+        self._gm_clear()
+        self._gm_title("\u2699  SETTINGS", "Your own preferences \u2014 they change "
+                       "nothing about the ground truth the wire is built from.")
+        wk = QDoubleSpinBox()
+        wk.setRange(0.5, 3.0); wk.setSingleStep(0.1); wk.setDecimals(1)
+        wk.setSuffix("  \u00d7")
+        wk.setValue(float(self.gl.walk_mult))
+        wk.valueChanged.connect(self._gm_set_walk)
+        self._gm_row("Walk speed", wk)
+
+        sp = QDoubleSpinBox()
+        sp.setRange(0.5, 4.0); sp.setSingleStep(0.1); sp.setDecimals(1)
+        sp.setSuffix("  \u00d7")
+        sp.setValue(float(self.gl.move_mult))
+        sp.setToolTip("How fast you fly. Esc or Tab closes this menu.")
+        sp.valueChanged.connect(self._gm_set_speed)
+        self._gm_row("Fly speed", sp)
+
+        bt = QDoubleSpinBox()
+        bt.setRange(1.0, 6.0); bt.setSingleStep(0.1); bt.setDecimals(1)
+        bt.setSuffix("  \u00d7")
+        bt.setValue(float(self.gl.boost_mult))
+        bt.setToolTip("Hold Shift to sprint on foot and boost in flight.")
+        bt.valueChanged.connect(self._gm_set_boost)
+        self._gm_row("Boost (hold Shift)", bt)
+
+        ls = QDoubleSpinBox()
+        ls.setRange(0.2, 3.0); ls.setSingleStep(0.1); ls.setDecimals(1)
+        ls.setSuffix("  \u00d7")
+        ls.setValue(float(self.gl.look_sens))
+        ls.valueChanged.connect(self._gm_set_look)
+        self._gm_row("Look sensitivity", ls)
+
+        cb = QComboBox()
+        for _m, _lab in (("auto", "auto (benchmark this host)"),
+                         ("off", "off (snapshot \u00b7 rebuild with B)"),
+                         ("delta", "delta \u00b7 1 Hz kernel deltas (cheap)"),
+                         ("capture", "capture \u00b7 real packets (heavy)")):
+            cb.addItem(_lab, _m)
+        i = cb.findData(self.gl.live_mode)
+        if i >= 0:
+            cb.setCurrentIndex(i)
+        cb.currentIndexChanged.connect(lambda _i: self._gm_set_live(cb.currentData()))
+        self._gm_row("Live vision", cb)
+
+        rn = QCheckBox("Show real names (the technical term for every place)")
+        rn.setChecked(bool(self.gl.show_real))
+        rn.toggled.connect(self._gm_set_real)
+        self._gm_body.addWidget(rn)
+        self._gm_back()
+
+    def _gm_controls(self):
+        self._gm_clear()
+        self._gm_title("\u2328  CONTROLS \u2014 every key")
+        rows = [
+            ("Move", "\u2191 \u2193 \u2190 \u2192  or  W A S D"),
+            ("Sprint / boost", "hold Shift \u2014 speed lines fly when you move fast"),
+            ("Up / down (in flight)", "Space  up  \u00b7  C  down"),
+            ("Look", "move the mouse \u00b7 click to capture \u00b7 Esc or right-click frees it"),
+            ("Fly on / off", "G"),
+            ("Interact \u00b7 enter a gate / room", "E"),
+            ("Rebuild from the files", "B"),
+            ("Back to the surface \u00b7 leave a room", "Home"),
+            ("Real names on / off", "T"),
+            ("This menu", "Tab"),
+            ("Full screen on / off", "F11"),
+            ("Leave full screen", "Esc"),
+            ("BlackHorse market", "H  (menu)  \u00b7  E on a platform"),
+            ("Candle room (at the column)", "E  then  1-4  \u00b7  Esc cancels"),
+            ("The Word (Qur'an)", "[  prev ayah  \u00b7  ]  next  \u00b7  R  random"),
+            ("The machine (this host)", "X x-ray  \u00b7  K arm  \u00b7  L release  \u00b7  M auto"),
+        ]
+        html = ["<table cellspacing='0' cellpadding='3' width='100%'>"]
+        for k, v in rows:
+            html.append(
+                f"<tr><td style='color:#8be0ff' nowrap>{k}</td>"
+                f"<td style='color:#cfe3dd'>{v}</td></tr>")
+        html.append("</table>")
+        lab = QLabel("".join(html))
+        lab.setTextFormat(Qt.TextFormat.RichText)
+        lab.setWordWrap(True)
+        self._gm_body.addWidget(lab)
+        self._gm_back()
+
+    def _gm_back(self):
+        b = QPushButton("\u25c0  back")
+        b.clicked.connect(self._gm_home)
+        self._gm_body.addWidget(b)
+        self._reflow_overlays()
+
+    def _gm_save(self):
+        try:
+            st = wiresettings.load()
+            st["fly_speed"] = float(self.gl.move_mult)
+            st["walk_speed"] = float(self.gl.walk_mult)
+            st["boost_mult"] = float(self.gl.boost_mult)
+            st["look_sensitivity"] = float(self.gl.look_sens)
+            wiresettings.save(st)
+        except Exception:
+            pass
+
+    def _gm_set_speed(self, v):
+        self.gl.move_mult = _clampf(v, 0.5, 4.0, 1.9)
+        self._gm_save()
+
+    def _gm_set_walk(self, v):
+        self.gl.walk_mult = _clampf(v, 0.5, 3.0, 1.0)
+        self._gm_save()
+
+    def _gm_set_boost(self, v):
+        self.gl.boost_mult = _clampf(v, 1.0, 6.0, 2.2)
+        self._gm_save()
+
+    def _gm_set_look(self, v):
+        self.gl.look_sens = _clampf(v, 0.2, 3.0, 1.0)
+        self._gm_save()
+
+    def _gm_set_real(self, on):
+        self.gl.show_real = bool(on)
+        self.cb_real.setChecked(bool(on))
+        self.gl.update()
+
+    def _gm_set_live(self, mode):
+        if mode is None:
+            return
+        info = self.gl.set_live_mode(mode)
+        self._refresh_live_ui(self.gl.live_mode, self.gl.live_effective, info)
+        self._reflow_overlays()
 
     def _word_btn(self, action):
         action()
@@ -3886,7 +6343,38 @@ class WireVisionTab(QWidget):
             self.bw_prev.setEnabled(self.gl._word_has_prev())
             self.bw_next.setText("finish \u2794 chapters" if self.gl._word_at_end()
                                  else "next ayah \u25b6")
-        self.deck.place_overlays()
+        self._reflow_overlays()
+
+    def _machine_btn(self):
+        if self.gl.machine:
+            self.gl._leave_machine()
+        else:
+            self.gl._enter_machine()
+        self.gl.setFocus()
+
+    def _refresh_machine_ui(self):
+        """The tab button mirrors the room; no floating bar (the room is flown)."""
+        on = bool(self.gl.machine)
+        self.b_machine.setText("\u21a9 leave the machine" if on else "\u29c9 the machine")
+        self._reflow_overlays()
+
+    def _on_live_change(self, _idx=None):
+        mode = self.cb_live.currentData() or "auto"
+        info = self.gl.set_live_mode(mode)
+        self._refresh_live_ui(self.gl.live_mode, self.gl.live_effective, info)
+
+    def _refresh_live_ui(self, mode, effective, info=None):
+        if info is None:
+            info = self.gl._live_info
+        i = self.cb_live.findData(mode)
+        if i >= 0 and self.cb_live.currentIndex() != i:
+            self.cb_live.blockSignals(True)
+            self.cb_live.setCurrentIndex(i)
+            self.cb_live.blockSignals(False)
+        self.cb_live.setToolTip("Live vision: " + wiresettings.describe(mode, effective, info)
+                                + "\n'auto' benchmarks THIS host once (cores, load, a tiny "
+                                  "timed loop) — no network, no tool.")
+        self._reflow_overlays()
 
     def build(self):
         try:
@@ -4105,7 +6593,12 @@ class WireVisionTab(QWidget):
         over_row.setStyleSheet("color:#cbb;")
         self._mform.addWidget(over_row)
         self._ed_ov = {}
-        base = prof.get("policy") or {}
+        # the effective profile policy: blackhorse's decider defaults with the
+        # profile's own cfg on top (agents.policy_for's base, minus the agent's
+        # overrides). So a blank field shows the value blackhorse shows, not "?".
+        base = dict(wiregate.PROFILE_DEFAULTS or {})
+        base.update(prof.get("cfg") or prof.get("policy") or {})
+        self._ed_base = base
         for k, (kind, lo, hi) in (wiregate.EDITABLE or {}).items():
             if k == "channels":
                 continue
@@ -4144,14 +6637,26 @@ class WireVisionTab(QWidget):
         if not aid or not hasattr(self, "_ed_ov"):
             return
         overrides = {}
+        base = getattr(self, "_ed_base", {}) or {}
+        had = ctx.get("ov") or {}
         for k, w in self._ed_ov.items():
             if isinstance(w, QDoubleSpinBox):
-                if w.specialValueText() and w.value() <= w.minimum():
+                val = w.value()
+                if k not in had and k in base:
+                    try:
+                        if abs(val - float(base[k])) < 1e-9:
+                            continue          # still the profile's own value
+                    except (TypeError, ValueError):
+                        pass
+                if w.specialValueText() and val <= w.minimum():
                     overrides[k] = None
                 else:
-                    overrides[k] = w.value()
+                    overrides[k] = val
             else:
-                overrides[k] = w.isChecked()
+                on = w.isChecked()
+                if k not in had and k in base and bool(base[k]) == on:
+                    continue                  # still the profile's own value
+                overrides[k] = on
         overrides = {k: v for k, v in overrides.items() if v is not None}
         pairs = [self._ed_pairs.item(i).text() for i in range(self._ed_pairs.count())
                  if self._ed_pairs.item(i).checkState() == Qt.CheckState.Checked]
@@ -4236,7 +6741,9 @@ def main():
     app = QApplication(sys.argv)
     w = WireVisionTab()
     w.resize(1200, 760)
+    w.close_requested.connect(w.close)
     w.show()
+    QTimer.singleShot(0, lambda: w.toggle_fullscreen(True))
     sys.exit(app.exec())
 
 

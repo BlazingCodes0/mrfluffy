@@ -49,9 +49,12 @@ WORD_APRON_CENTER = math.pi    # due −x — Learn Islam, the room of the Word
 WORD_APRON_HALF = 0.50         # ~28.6° either side stays clear for the hall
 NET_APRON_CENTER = -math.pi * 0.5   # due −z — the pier out to the outward gate
 NET_APRON_HALF = 0.30          # keep the LAN cluster off the pier
+MACHINE_APRON_CENTER = math.pi * 0.5  # due +z — the hatch down into THIS machine
+MACHINE_APRON_HALF = 0.30      # the one free wedge: the box under your feet
 PLAZA_WEDGES = ((MARKET_APRON_CENTER, MARKET_APRON_HALF),
                 (WORD_APRON_CENTER, WORD_APRON_HALF),
-                (NET_APRON_CENTER, NET_APRON_HALF))
+                (NET_APRON_CENTER, NET_APRON_HALF),
+                (MACHINE_APRON_CENTER, MACHINE_APRON_HALF))
 
 
 def _device_angles(n):

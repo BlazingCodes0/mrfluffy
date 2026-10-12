@@ -437,7 +437,12 @@ def _sources() -> list:
         ("ids · suricata alerts", str(IDS), "run raven/ids/run_suricata.sh"),
         ("dye · who is on the wire", str(DYE / "contacts.json"), "run dye"),
         ("finch · baseline", str(FINCH / "baseline.json"), "run finch"),
+        ("finch · quarantine", str(FINCH / "quarantine"),
+         "finch lifts a kit here, host-local"),
         ("shield · baseline", str(SHIELD / "baseline.json"), "run shield"),
+        ("crow · newest report", str(CROW), "fly a crow — recon / eyes"),
+        ("lifeline · control", "/tmp/ravenheart/control.json",
+         "ravenheart.py owns the switches"),
     ]
     out = []
     now = time.time()
@@ -453,6 +458,91 @@ def _sources() -> list:
                     "stale": (not exists) or (age is not None and age > 3600),
                     "hint": hint})
     return out
+
+
+# ---- the birds: crow / finch / raven, read-only from their own files --------
+# Reading only. The birds are NOT dispatched from here (that is the renderer's
+# arming gate, and finch's hand is `birdguard.py`); this just reports the state
+# of their own local files so the room can show what each bird would say.
+
+def _crow_bird() -> dict:
+    b = {"kind": "crow", "role": "recon / eyes",
+         "action": "read the newest crow report",
+         "file": None, "age": "none yet", "age_s": None,
+         "verdict": "", "returned": ""}
+    try:
+        reports = sorted(CROW.glob("crow-*_report.txt"),
+                         key=lambda p: p.stat().st_mtime, reverse=True)
+    except Exception:
+        reports = []
+    if not reports:
+        return b
+    p = reports[0]
+    b["file"] = str(p)
+    try:
+        age = time.time() - p.stat().st_mtime
+        b["age"], b["age_s"] = _ago(age), int(age)
+    except Exception:
+        pass
+    for line in _read(p).splitlines():
+        s = line.strip()
+        if not b["verdict"] and "VERDICT" in s:
+            b["verdict"] = s
+        if not b["returned"] and s.startswith("CROW RETURNED"):
+            b["returned"] = s
+        if b["verdict"] and b["returned"]:
+            break
+    return b
+
+
+def _finch_bird() -> dict:
+    base = _load(FINCH / "baseline.json", {}) or {}
+    conn = base.get("conn") or {}
+    exec_state = _load(FINCH / "exec_state.json", {}) or {}
+    files, nbytes = 0, 0
+    try:
+        for p in (FINCH / "quarantine").rglob("*"):
+            if p.is_file():
+                files += 1
+                try:
+                    nbytes += p.stat().st_size
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    age = None
+    try:
+        age = int(time.time() - (FINCH / "baseline.json").stat().st_mtime)
+    except Exception:
+        pass
+    return {"kind": "finch", "role": "quarantine / contain (host-local)",
+            "action": "draft a local containment plan",
+            "baseline_age": _ago(age), "baseline_age_s": age,
+            "conn_ssid": conn.get("ssid"), "trusted_ssid": base.get("trusted_ssid"),
+            "dev": base.get("dev"), "quarantine_files": files,
+            "quarantine_bytes": nbytes, "exec_watch": len(exec_state)}
+
+
+def _raven_bird() -> dict:
+    st = _load(HEART, {}) or {}
+    ctrl = _load(Path("/tmp/ravenheart/control.json"), {}) or {}
+    guard = st.get("guard") or {}
+    heart_age = None
+    try:
+        heart_age = int(time.time() - HEART.stat().st_mtime)
+    except Exception:
+        pass
+    return {"kind": "raven", "role": "scope gate",
+            "action": "check whether a figure is in scope",
+            "up": st.get("up"), "iface": st.get("iface"), "gw": st.get("gw"),
+            "guard_mode": guard.get("mode"), "strikes": st.get("strikes", 0),
+            "auto": ctrl.get("auto"), "survival": ctrl.get("survival"),
+            "opencode": ctrl.get("opencode"),
+            "heart_age": _ago(heart_age), "heart_age_s": heart_age}
+
+
+def _birds() -> list:
+    return [_crow_bird(), _finch_bird(), _raven_bird()]
 
 
 def _truth(ties: int, figures: list) -> dict:
@@ -530,6 +620,7 @@ def build() -> dict:
         "roads": roads,
         "inhabitants": inhabitants,
         "figures": figures,
+        "birds": _birds(),
         "counts": {"doors": len(doors), "roads": len(roads),
                    "inhabitants": len(inhabitants), "figures": len(figures),
                    "users": len(set(users.values()))},
