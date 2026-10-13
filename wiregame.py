@@ -18,29 +18,35 @@ Standalone:  python3 wiregame.py
 """
 from __future__ import annotations
 import math, os, random, sys, time, hashlib, html, re, collections, threading
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, pyqtSignal
-from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QPainter, QPen, QSurfaceFormat,
-                         QCursor, QRadialGradient, QShortcut, QKeySequence)
+from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap,
+                         QBrush, QSurfaceFormat, QCursor, QRadialGradient,
+                         QShortcut, QKeySequence)
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
     QSplitter, QTextBrowser, QVBoxLayout, QWidget)
 
 import numpy as np
 from OpenGL.GL import *
 from OpenGL.GLU import *
+from urllib.parse import quote_plus
 
 import wirevision
 import wiregate
 import wirenet
 import machinevision
 import birdguard
+import wiredeliver
 import wiresettings
 import quran
 import quranworld
 import candlevision
+import wifivision
+import wirepearls
 from wiregate import MARKET_FLOOR_Y, MARKET_R, RETURN_GATE_POS
 
 MARKET_GATE_POS = [23.0, 0.06, 0.0]   # the tall portal to BlackHorse — its own cleared plaza, due +x
@@ -57,7 +63,20 @@ NET_GATE_R = 52.0                     # the gate stands at the seaward end
 NET_GATE_X = NET_GATE_R * math.cos(NET_ANGLE)
 NET_GATE_Z = NET_GATE_R * math.sin(NET_ANGLE)
 NET_PROBE_R = 10.0                    # close enough and the world starts a real probe
-NET_HOST_ENV = "MRFLUFFY_NET_HOST"    # the real address to dial (unset = a neutral default)
+NET_HOST_ENV = "MRFLUFFY_NET_HOST"    # the real address to dial (env overrides the saved choice)
+NET_DEFAULT_HOST = "https://1.1.1.1/cdn-cgi/trace"   # the neutral reachability target
+NET_ADDR_ENV = "MRFLUFFY_WIRE_ADDR"   # the local interface the presence serves a door on
+NET_PORT_ENV = "MRFLUFFY_WIRE_PORT"
+RELAY_ENV = "MRFLUFFY_GATE_URL"       # the mesh seeds (env overrides the saved choice)
+
+# the deep's faint beacon — a message drawn from nothing in the open sea, a
+# glow you can fly to once you are past the last electron. Atmosphere only: it
+# is not an entity and carries no datum, no device, no promise. Ground truth
+# stopped at the edge; this is the sea below it, and the sea has no bottom.
+DEEP_BEACON_D = 300.0                 # how far below the edge it hangs
+DEEP_BEACON_OFF = (9.0, -7.0)         # lateral offset from the fall's own centre
+DEEP_BEACON_R = 15.0                  # within this radius the words gather and read
+DEEP_BEACON_WORDS = "CREATE \u00b7 BUILD \u00b7 LEARN \u00b7 LOVE"
 
 # the room of the Word (Learn Islam): a calm hall on the far side, due −x.
 # No image, nothing depicted — the room holds only scripture on light. From the
@@ -74,6 +93,8 @@ WORD_CLUSTER_TOP = WORD_FLOOR_Y + 56.0   # highest a chapter-star hangs
 WORD_NEXT_ANGLE = 0.0        # gate to the next ayah, due +x
 WORD_PREV_ANGLE = math.pi * 0.5   # gate to the previous ayah
 WORD_BACK_ANGLE = math.pi    # gate back to the chapters
+WORD_ISLAMQA_POS = [-11.0, WORD_FLOOR_Y, WORD_R - 11.0]  # gate out to IslamQA
+EXCHANGE_WORD_GID = "learnislam"   # the gate on the ring back into the Word
 
 # the EXCHANGE — the hall the outward gate opens into: a room of gates. Each gate
 # leads to a real service out on the net, and what a gate answers is real. For now
@@ -102,6 +123,12 @@ MACHINE_FLOOR_Y = -160.0                  # the machine sits below the Exchange
 MACHINE_R = 30.0
 MACHINE_DOOR_R = 15.0                     # the ring of doors (ways in)
 MACHINE_WALL_R = 20.0                     # the shell's wall, between doors and figures
+
+# the wifi apron: the radio's own last scan, ringed high in the signal cloud.
+# Reachable networks the box could join — the only way a box with no wifi sight
+# of its own connects through Mr.Fluffy. Read from the cache; never a live probe.
+WIFI_R = 15.0
+WIFI_Y = 20.0
 MACHINE_FIGURE_R = 25.0                   # dark figures stand in the field outside
 MACHINE_RETURN_POS = [0.0, MACHINE_FLOOR_Y + 6.0, MACHINE_R - 7.0]  # up to the wire
 MACHINE_COL = (0.35, 0.92, 0.58)          # terminal green — a machine readout
@@ -224,6 +251,9 @@ class _GLDeck(QWidget):
                 x, y = (w - sw) // 2, 12
             elif anchor == "top-left":
                 x, y = 14, 14
+            elif anchor == "top-left-below":
+                x, y = 14, 58
+                sh = min(sh, max(120, h - y - 12))
             elif anchor == "top-right":
                 x, y = w - sw - 14, 14
             elif anchor == "bottom-right":
@@ -260,6 +290,29 @@ def _clampf(v, lo, hi, fallback):
         return max(lo, min(hi, float(v)))
     except Exception:
         return fallback
+
+
+def _wireset(key, env, default=""):
+    """The outward connection is the player's own choice, not a hardcoded value.
+    An environment variable, if set, still wins; otherwise the saved preference
+    (wiresettings.json) is used; otherwise the neutral default. Returns a string."""
+    try:
+        raw = os.environ.get(env)
+    except Exception:
+        raw = None
+    if raw is not None and raw.strip():
+        return raw.strip()
+    try:
+        val = wiresettings.load().get(key)
+    except Exception:
+        val = None
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+    return default
+
+
+def _relay_seeds(text):
+    return [u.strip().rstrip("/") for u in (text or "").split(",") if u.strip()]
 
 
 def _hbytes(n):
@@ -384,6 +437,9 @@ class WireGLWidget(QOpenGLWidget):
     candles_changed = pyqtSignal()             # entered/left the candle room
     live_changed = pyqtSignal(str, str)        # live mode, effective mode
     menu_request = pyqtSignal()                # Tab — the tab opens the game menu
+    deliver_toggle = pyqtSignal(object)        # P — pass the device, or None to close
+    wifi_chosen = pyqtSignal(object)           # E beside a network mote — the tab opens it
+    pearl_menu = pyqtSignal()                  # N in the Exchange — the tab opens the ring
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -407,6 +463,9 @@ class WireGLWidget(QOpenGLWidget):
         self.transition = None
         self.deep = None            # the open sea below the edge: unbounded, no data
         self.flying = False         # free flight through the wire (G toggles)
+        # the one real handoff: hand a file to a device on the same wifi (P, in flight)
+        self.deliver = wiredeliver.Delivery()
+        self.deliver_open = False   # the send-a-file panel is showing
         # the market — blackhorse, entered through the gate on the wire floor
         self.market = False
         self.market_world = None
@@ -417,6 +476,12 @@ class WireGLWidget(QOpenGLWidget):
         self._online = False
         self._ghost_line = ""
         self._beat = 0.0
+        self._wire_peers = []
+        self._wire_online = False
+        self._wire_beat = 0.0
+        # the wifi apron — the radio's last scan, drawn on the floor. The panel
+        # and the gated real connect live on the tab (wifi_chosen drives them).
+        self._wifi = None                # wifivision.build() result (lazy)
         # the room of the Word — Learn Islam, read in the wire (no imagery)
         self.word = False
         self.word_mode = "select"        # "select" (chapters) | "ayah" (a world)
@@ -428,7 +493,10 @@ class WireGLWidget(QOpenGLWidget):
         self._word_cluster_n = -1
         # the outward gate — the one place the wire is REAL (wirenet, no browser)
         self.net = None                  # lazily-started background dialer
-        self._net_host = os.environ.get(NET_HOST_ENV) or "https://1.1.1.1/cdn-cgi/trace"
+        # the outward connection is YOUR choice (env still overrides): the one
+        # address the pier gate dials, and the mesh seeds the presence joins.
+        self._net_host = _wireset("net_host", NET_HOST_ENV, NET_DEFAULT_HOST)
+        self._relay_seeds = _wireset("relay_seeds", RELAY_ENV)
         self._net_job = None
         self._net_result = None
         self._net_probe_t = 0.0
@@ -457,6 +525,12 @@ class WireGLWidget(QOpenGLWidget):
         self._pkt_t = 0.0
         self.web_tabs = []               # result-tablets you fly to
         self.web_mono = None             # the page, assembled as light
+        self.service_kind = "search"     # "search" (DDG) or "site" (a kept pearl)
+        self.service_name = ""           # the gate you stepped into, by name
+        self.service_url = ""            # a kept site's real address
+        self.service_host = ""           # a kept site's host (for a site: search)
+        self.service_search = ""         # optional own-search URL template with {q}
+        self.gates = self._ring_gates()  # the ring: DDG + every pearl (wirepearls)
         # the machine — the box under your feet, entered by a hatch on the wire
         self.machine = False
         self.machine_world = None        # machinevision.build() — this host, live
@@ -612,6 +686,11 @@ class WireGLWidget(QOpenGLWidget):
         self._pkt_t = 0.0
         self.web_tabs = []
         self.web_mono = None
+        self.service_kind = "search"
+        self.service_name = ""
+        self.service_url = ""
+        self.service_host = ""
+        self.service_search = ""
         self.machine = False
         self.machine_world = None
         self.machine_xray = False
@@ -757,6 +836,52 @@ class WireGLWidget(QOpenGLWidget):
             glVertex3f(x, yy, z)
             glVertex3f(x, yy + 1.6, z)
             glEnd()
+
+    def _deep_beacon_pos(self):
+        """Where the deep's faint glow hangs — a fixed point in the open sea,
+        far below the edge. Atmosphere only: not an entity, no datum."""
+        bx, bz = DEEP_BEACON_OFF
+        return (bx, self._floor_y(5) + EYE - DEEP_BEACON_D, bz)
+
+    def _deep_beacon_dist(self):
+        bx, by, bz = self._deep_beacon_pos()
+        return math.sqrt((self.pos[0] - bx) ** 2 +
+                         (self.pos[1] - by) ** 2 + (self.pos[2] - bz) ** 2)
+
+    def _deep_beacon(self, t):
+        """A faint glow in the distance — a soft core and a few slow motes, so it
+        reads as a point in the sea you can judge and fly to. Faint far away,
+        steady up close. Drawn from nothing: no entity, no datum, no promise."""
+        bx, by, bz = self._deep_beacon_pos()
+        dist = math.sqrt((self.pos[0] - bx) ** 2 + (self.pos[1] - by) ** 2
+                         + (self.pos[2] - bz) ** 2)
+        if dist > 900.0:
+            return
+        near = max(0.0, 1.0 - dist / 420.0)
+        glow = 0.12 + 0.75 * near * near
+        pulse = 1.0 + 0.10 * math.sin(t * 1.7)
+
+        def orb(x, y, z, r, cc, a):
+            glColor4f(cc[0], cc[1], cc[2], max(0.0, min(0.9, a)))
+            glPushMatrix()
+            glTranslatef(x, y, z)
+            gluSphere(self._quad, r, 12, 10)
+            glPopMatrix()
+
+        # translucent layers, depth writes off so they blend into a soft glow
+        glDisable(GL_DEPTH_TEST)
+        glDepthMask(False)
+        for rr, cc, aa in ((5.2, (0.16, 0.70, 0.82), 0.28),
+                           (2.6, (0.34, 0.95, 0.86), 0.42),
+                           (1.0, (0.80, 1.00, 0.96), 0.72)):
+            orb(bx, by, bz, rr * pulse, cc, glow * aa * pulse)
+        # a slow halo of sparks, so the glow reads as a place, not a pixel
+        for k in range(7):
+            a = t * 0.5 + k * (2 * math.pi / 7)
+            orb(bx + 6.5 * math.cos(a), by + 1.4 * math.sin(a * 2.0),
+                bz + 6.5 * math.sin(a), 0.22, (0.50, 0.95, 0.85), glow * 0.55)
+        glDepthMask(True)
+        glEnable(GL_DEPTH_TEST)
 
     def _well(self, t=0.0):
         y0 = self._floor_y()
@@ -967,6 +1092,44 @@ class WireGLWidget(QOpenGLWidget):
             x, z = c["pos"]
             bob = 0.5 * math.sin(t * 1.6 + x)
             self._crow(x, y + 4.0 + bob, z, t)
+        # other shells on the wire — motes out past the wall, no gate, just present.
+        for p in self._wire_peers:
+            name = p.get("name") or "?"
+            h = sum((ord(c) * 2654435761) & 0xFFFFFFFF for c in name)
+            ang = (h % 1000) / 1000.0 * math.tau
+            rx, rz = (WALL_R + 7.0) * math.cos(ang), \
+                     (WALL_R + 7.0) * math.sin(ang)
+            fresh = time.time() - p.get("t", 0) < 20
+            pl = 0.70 + 0.30 * math.sin(t * 3.0 + ang)
+            if fresh:
+                col = (0.35 * pl, 0.80 * pl, 0.95 * pl)
+            else:
+                col = (0.42 * pl, 0.48 * pl, 0.60 * pl)
+            self._octa(rx, y + 2.6 + 0.5 * math.sin(t * 2.2 + ang), rz,
+                       1.1, col, squash=1.7)
+            self._vring(rx, y + 1.2, rz, 1.6,
+                        (col[0] * 0.8, col[1] * 0.8, col[2] * 0.8), t + ang)
+        # the wifi apron — reachable networks the radio last saw, ringed high in
+        # the signal cloud. Observed SSIDs; the bars are the radio's own reading.
+        wnets = self._wifi_networks().get("networks") or []
+        for i, net in enumerate(wnets):
+            x, wy, z = self._wifi_pos(i, len(wnets))
+            s = max(0.0, min(1.0, net["signal"] / 100.0))
+            if net["in_use"]:
+                col = (1.0, 0.80, 0.30)
+            elif net.get("open"):
+                col = (0.40, 0.95, 0.55)
+            else:
+                col = (0.35, 0.75, 1.00)
+            col = tuple(c * (0.45 + 0.55 * s) for c in col)
+            bob = 0.4 * math.sin(t * 1.4 + i)
+            self._octa(x, wy + bob, z, 0.7 + 1.1 * s, col, squash=1.7)
+            self._portal(x, z, wy - 2.6, 1.5, col, t + i * 0.4)
+            lit = int(round(s * 3))            # signal bars, strength made visible
+            for b in range(3):
+                bh = 0.5 + b * 0.55
+                if b < lit:
+                    self._cube(x, wy - 3.4 + bh * 0.5, z, 0.22, bh, 0.22, col)
         # the gate to BlackHorse — the market, entered from the wire
         self._market_apron(t, y)
         self._draw_market_gate(t, y)
@@ -1347,6 +1510,34 @@ class WireGLWidget(QOpenGLWidget):
                           "THE MACHINE \u2014 down into this host [E] \u00b7 "
                           "the box under your feet, read live",
                           (0.62, 1.0, 0.72)))
+            for p in self._wire_peers:
+                name = p.get("name") or "?"
+                h = sum((ord(c) * 2654435761) & 0xFFFFFFFF for c in name)
+                ang = (h % 1000) / 1000.0 * math.tau
+                rx, rz = (WALL_R + 7.0) * math.cos(ang), \
+                         (WALL_R + 7.0) * math.sin(ang)
+                card = p.get("card") or {}
+                ago = int(time.time() - p.get("t", 0))
+                sub = "shell \u00b7 "
+                if card:
+                    sub += f"{card.get('devices', '?')} dev(s), {card.get('gates', '?')} gate(s)"
+                    if card.get("complexes") not in (None, "none"):
+                        sub += f" \u00b7 {card['complexes']}"
+                fresh = ago < 20
+                col = (0.55, 0.95, 1.0) if fresh else (0.5, 0.55, 0.68)
+                items.append((rx, y + 5.0, rz,
+                              f"\u25c6 {name} \u00b7 {sub} \u00b7 seen {ago}s ago", col))
+            wnets = self._wifi_networks().get("networks") or []
+            for i, net in enumerate(wnets):
+                wx, wy, wz = self._wifi_pos(i, len(wnets))
+                tag = ("\u25c8 on this" if net["in_use"] else
+                       "open" if net.get("open") else "secured")
+                if net.get("saved"):
+                    tag += " \u00b7 saved"
+                col = (1.0, 0.85, 0.40) if net["in_use"] else (0.62, 0.86, 1.0)
+                items.append((wx, wy + 3.2, wz,
+                              f"\u2601 {net['ssid']} \u00b7 {tag} \u00b7 "
+                              f"{net['signal']}%  [E]", col))
         else:
             st = self.world["strata"][self.active - 1]
             for a in st["artifacts"]:
@@ -1449,6 +1640,9 @@ class WireGLWidget(QOpenGLWidget):
                     self._word_to_select()
         elif k == Qt.Key.Key_H:
             self.menu_toggle.emit(True)
+        elif k == Qt.Key.Key_N:
+            if self.exchange:
+                self.pearl_menu.emit()       # the pearl ring — cast / uncast a site
         elif k == Qt.Key.Key_Home:
             if self.candles:
                 self._leave_candles()
@@ -1466,6 +1660,8 @@ class WireGLWidget(QOpenGLWidget):
                 self._go_surface()
         elif k == Qt.Key.Key_G:
             self._toggle_fly()
+        elif k == Qt.Key.Key_P:
+            self._try_deliver()
         elif k == Qt.Key.Key_Tab:
             self.menu_request.emit()          # open the game menu (Tab toggles)
         elif k == Qt.Key.Key_F11:
@@ -1574,13 +1770,49 @@ class WireGLWidget(QOpenGLWidget):
             return
         if self.deep is not None:
             d = self.deep
-            d["vy"] = min(22.0, d["vy"] + 16.0 * dt)     # fall, then terminal drift
+            # you keep falling, but you may steer: WASD glides you sideways through
+            # the sea and Space/C slow or hasten the drop, so you can fly to the glow.
+            k = self.keys
+            fast = self._boost()
+            yaw_spd = 1.8 * dt
+            if Qt.Key.Key_Left in k or Qt.Key.Key_Q in k:
+                self.yaw -= yaw_spd
+            if Qt.Key.Key_Right in k:
+                self.yaw += yaw_spd
+            look_y = False
+            if Qt.Key.Key_Up in k or Qt.Key.Key_R in k:
+                self.pitch = min(1.2, self.pitch + yaw_spd); look_y = True
+            if Qt.Key.Key_Down in k or Qt.Key.Key_F in k:
+                self.pitch = max(-1.2, self.pitch - yaw_spd); look_y = True
+            spd = 12.0 * self.move_mult * fast * dt
+            fx, fz = math.sin(self.yaw), -math.cos(self.yaw)
+            rx, rz = math.cos(self.yaw), math.sin(self.yaw)
+            mx = mz = 0.0
+            if Qt.Key.Key_W in k:
+                mx += fx; mz += fz
+            if Qt.Key.Key_S in k:
+                mx -= fx; mz -= fz
+            if Qt.Key.Key_A in k:
+                mx -= rx; mz -= rz
+            if Qt.Key.Key_D in k:
+                mx += rx; mz += rz
+            m = math.hypot(mx, mz)
+            if m > 0:
+                self._speed_now = 12.0 * self.move_mult * fast
+                d["hx"] += mx / m * spd
+                d["hz"] += mz / m * spd
+            d["vy"] = min(22.0, d["vy"] + 16.0 * dt)   # fall, then terminal drift
+            if Qt.Key.Key_Space in k:
+                d["vy"] = max(1.0, d["vy"] - 14.0 * dt)   # slow the fall
+            if Qt.Key.Key_C in k:
+                d["vy"] = min(30.0, d["vy"] + 10.0 * dt)  # speed the fall
             d["d"] += d["vy"] * dt
             ang = d["d"] * 0.045
-            self.pos[0] = 1.4 * math.sin(ang)
-            self.pos[2] = 1.4 * math.cos(ang * 0.71)
+            self.pos[0] = 1.4 * math.sin(ang) + d["hx"]
+            self.pos[2] = 1.4 * math.cos(ang * 0.71) + d["hz"]
             self.pos[1] = self._floor_y(5) + EYE - d["d"]
-            self.pitch = max(-1.15, self.pitch - 0.20 * dt)   # settle into the fall
+            if not look_y:
+                self.pitch = max(-1.15, self.pitch - 0.20 * dt)   # settle, gently
             return
         if self.transition:
             tr = self.transition
@@ -1615,6 +1847,32 @@ class WireGLWidget(QOpenGLWidget):
                 self.transition = None
                 self.pitch = -0.05
             return
+        # ---- the wire: whatever uplink this shell holds, it is ON the wire. ----
+        # The relay answers over wifi, a hotspot or a satellite link alike — the
+        # medium is just a door. Announce on a beat and read who else answers.
+        self._wire_beat += dt
+        if self._wire_beat >= 1.2:
+            self._wire_beat = 0.0
+            pr = self._wire_presence()
+            if pr is not None:
+                wr = self.world or {}
+                card = None
+                try:
+                    card = {"devices": len(wr.get("devices", [])),
+                            "gates": len(wr.get("gates", [])),
+                            "complexes": (wr.get("complexes") or [{}])[0]
+                                         .get("domain", "none"),
+                            "newest": (wr.get("memory") or {}).get("newest", "?")}
+                except Exception:
+                    pass
+                ok = pr.announce({"x": self.pos[0], "y": self.pos[1],
+                                  "z": self.pos[2], "where": "street",
+                                  "card": card})
+                pr.gossip()
+                self._wire_online = ok
+                self._wire_peers = pr.peers()
+                if ok:
+                    self._ghost_line = pr.describe()
         k = self.keys
         fast = self._boost()
         spd = 9.0 * self.walk_mult * fast * dt
@@ -1922,7 +2180,7 @@ class WireGLWidget(QOpenGLWidget):
         self.yaw = 0.0
         self.pitch = -0.04
         if start:
-            self._flash("LEARN ISLAM \u2014 a cluster of chapters, hung like stars. "
+            self._flash("LEARN ISLAM \u2014 the chapters arrayed like stars. "
                         "Fly to a star and press E \u00b7 R opens a random chapter")
         elif not quiet:
             self._flash("back to the cluster of chapters \u2014 fly to another star, "
@@ -1977,6 +2235,15 @@ class WireGLWidget(QOpenGLWidget):
 
     def word_leave_room(self):
         self._leave_word()
+
+    def _word_to_islamqa(self):
+        """Leave the room of the Word out to the IslamQA pearl in the Exchange."""
+        self._leave_word()
+        self._enter_exchange()
+        if any(g["id"] == "islamqa" for g in self.gates):
+            self._open_service("islamqa")
+            self._flash("IslamQA \u2014 ask the scholars; the room of the Word is one "
+                        "gate back")
 
     def word_open_surah(self, number):
         """Open any chapter by its mushaf number (from the codex list)."""
@@ -3052,6 +3319,18 @@ class WireGLWidget(QOpenGLWidget):
         rx, ry, rz = WORD_RETURN_POS
         self._portal(rx, rz, ry - 0.5, 2.8, (0.52, 0.78, 0.90), t + 0.7)
         self._portal(rx, rz, ry + 2.0, 1.8, (0.32, 0.56, 0.70), t + 1.6)
+        # the gate out to IslamQA, in the Exchange — the scholars, one step away
+        ix, iy, iz = WORD_ISLAMQA_POS
+        self._cube(ix, iy + 1.2, iz, 1.1, 2.0, 1.1, (0.24, 0.15, 0.05))
+        glColor4f(0.90, 0.72, 0.30, 0.34)
+        gr = 2.0 + 0.12 * math.sin(t * 1.3)
+        glBegin(GL_QUADS)
+        glVertex3f(ix - gr, iy - 2.2, iz)
+        glVertex3f(ix + gr, iy - 2.2, iz)
+        glVertex3f(ix + gr * 0.7, iy + 4.0, iz)
+        glVertex3f(ix - gr * 0.7, iy + 4.0, iz)
+        glEnd()
+        self._portal(ix, iz, iy - 2.6, 2.3, (0.92, 0.74, 0.34), t + 0.5)
         glLineWidth(1.0)
 
     def _draw_word_ayah(self, t):
@@ -3264,6 +3543,10 @@ class WireGLWidget(QOpenGLWidget):
             items.append((lx, ly + 2.4, lz,
                           "leave the room of the Word [E] \u2014 back to the wire",
                           (0.72, 0.92, 1.0)))
+            ix, iy, iz = WORD_ISLAMQA_POS
+            items.append((ix, iy + 5.2, iz,
+                          "IslamQA \u2014 ask the scholars [E]  \u00b7  out to the Exchange",
+                          (0.95, 0.80, 0.42)))
         for p in self._peers:
             items.append((p["x"], p["y"] + 2.0, p["z"], f"\u25c8 {p['name']}",
                           self._peer_col(p["name"])))
@@ -3612,6 +3895,13 @@ class WireGLWidget(QOpenGLWidget):
             consider("word", WORD_GATE_POS[0], WORD_GATE_POS[2], 4.6)
             consider("net", NET_GATE_X, NET_GATE_Z, 6.0)
             consider("machine", MACHINE_HATCH_POS[0], MACHINE_HATCH_POS[2], 4.6)
+            py = self.pos[1]
+            wnets = self._wifi_networks().get("networks") or []
+            for i, net in enumerate(wnets):
+                wx, wy, wz = self._wifi_pos(i, len(wnets))
+                wd = math.sqrt((px - wx) ** 2 + (py - wy) ** 2 + (pz - wz) ** 2)
+                if wd <= 7.0 and (best is None or wd < best["d"]):
+                    best = {"kind": "wifi", "d": wd, "net": net}
             for s in self._ruin_segments():
                 dx = WALL_R * math.cos(s["angle"])
                 dz = WALL_R * math.sin(s["angle"])
@@ -3624,6 +3914,40 @@ class WireGLWidget(QOpenGLWidget):
         else:
             consider("electron", 0, 0, WELL_R + 3.0)
         return best
+
+    def _nearest_device(self):
+        """The device on your own segment you are standing beside (a real phone).
+        Deliveries are only to devices on the segment you are on right now; the
+        gateway (the way out) and your own box are not handoff targets."""
+        if not self.world or self.deep is not None or self.active != 0:
+            return None
+        px, pz = self.pos[0], self.pos[2]
+        best = None
+        for d in self.world.get("devices", []):
+            if not d.get("on_my_segment"):
+                continue
+            if d.get("is_self") or d.get("role") == "gateway":
+                continue
+            pos = d.get("pos") or [0, 0]
+            dist = math.hypot(px - pos[0], pz - pos[1])
+            if dist <= 3.4 and (best is None or dist < best[0]):
+                best = (dist, d)
+        return best[1] if best else None
+
+    def _try_deliver(self):
+        """P on the floor: the one real handoff — hand a file to the device you
+        are standing beside, over the wifi. Flight first (ghost), then P."""
+        if self.deliver_open:
+            self.deliver_toggle.emit(None)      # the tab closes the panel
+            return
+        if not self.flying:
+            self._flash("press G first \u2014 to hand a file you fly in from the wire (ghost mode)")
+            return
+        dev = self._nearest_device()
+        if dev is None:
+            self._flash("fly close to a device on your wifi first")
+            return
+        self.deliver_toggle.emit(dev)
 
     def _nearest_market(self):
         px, py, pz = self.pos
@@ -3670,8 +3994,40 @@ class WireGLWidget(QOpenGLWidget):
             consider("word_surah", x, y, z, 6.0, surah=s)
         x, y, z = self._word_random_pos()
         consider("word_random", x, y, z, 6.0)
+        consider("word_islamqa", WORD_ISLAMQA_POS[0], WORD_ISLAMQA_POS[1],
+                 WORD_ISLAMQA_POS[2], 5.5)
         consider("word_leave", WORD_RETURN_POS[0], WORD_RETURN_POS[1],
                  WORD_RETURN_POS[2], 5.5)
+        return best
+
+    def _wifi_networks(self):
+        """The apron's networks, read lazily from the radio's own last scan (a
+        memory, never a probe we launch). Cached; refresh with the panel's button
+        (on the tab) or a floor rebuild."""
+        if self._wifi is None:
+            try:
+                self._wifi = wifivision.build()
+            except Exception as e:
+                self._wifi = {"ok": False, "reason": str(e), "networks": [],
+                              "on": None}
+        return self._wifi
+
+    def _wifi_pos(self, i, n):
+        ang = (i / max(1, n)) * math.tau
+        return (WIFI_R * math.cos(ang), self._floor_y() + WIFI_Y,
+                WIFI_R * math.sin(ang))
+
+    def _nearest_wifi(self):
+        if not self.world or self.deep is not None or self.active != 0:
+            return None
+        px, py, pz = self.pos
+        nets = self._wifi_networks().get("networks") or []
+        best = None
+        for i, net in enumerate(nets):
+            x, y, z = self._wifi_pos(i, len(nets))
+            d = math.sqrt((px - x) ** 2 + (py - y) ** 2 + (pz - z) ** 2)
+            if d <= 7.0 and (best is None or d < best["d"]):
+                best = {"kind": "wifi", "d": d, "net": net}
         return best
 
     def _interact(self):
@@ -3728,6 +4084,8 @@ class WireGLWidget(QOpenGLWidget):
                 self._word_move(-1)
             elif n["kind"] == "word_chapters":
                 self._word_to_select()
+            elif n["kind"] == "word_islamqa":
+                self._word_to_islamqa()
             elif n["kind"] == "word_leave":
                 self._leave_word()
             return
@@ -3735,7 +4093,11 @@ class WireGLWidget(QOpenGLWidget):
             if n["kind"] == "web_tablet":
                 self._web_open_tablet(n["index"])
             elif n["kind"] == "service":
-                self._open_service(n["gate"]["id"])
+                g = n["gate"]
+                if g.get("kind") == "word":
+                    self._exchange_to_word()
+                else:
+                    self._open_service(g["id"])
             elif n["kind"] == "leave_exchange":
                 self._leave_exchange()
             return
@@ -3751,6 +4113,8 @@ class WireGLWidget(QOpenGLWidget):
             self._enter_word()
         elif n["kind"] == "machine":
             self._enter_machine()
+        elif n["kind"] == "wifi":
+            self.wifi_chosen.emit(n["net"])
         elif n["kind"] == "net":
             self._net_go()
         elif n["kind"] == "heart":
@@ -3773,10 +4137,17 @@ class WireGLWidget(QOpenGLWidget):
     def _enter_deep(self):
         """Step off the edge into the sea of information. It is vast and infinite
         and it has no bottom — but below the edge there are no named entities,
-        only the descent itself. Ground truth stops; the sea carries no data."""
-        self.deep = {"d": 0.0, "vy": 0.0}
+        only the descent itself. Ground truth stops; the sea carries no data.
+
+        You keep falling, but you may now steer with WASD toward the one faint
+        glow down there — a message drawn from nothing, carrying no data."""
+        self.deep = {"d": 0.0, "vy": 0.0, "hx": 0.0, "hz": 0.0}
         self.focus = ""
-        self._flash("past the last electron — the sea has no bottom")
+        bx, bz = DEEP_BEACON_OFF
+        self.yaw = math.atan2(bx, -bz) if (bx or bz) else 0.0
+        self.pitch = -0.45                 # eye settles down toward the far glow
+        self._flash("past the last electron \u2014 the sea has no bottom "
+                    "\u00b7 WASD to steer toward the glow")
 
     def _exit_deep(self, surface=False):
         self.deep = None
@@ -3831,11 +4202,35 @@ class WireGLWidget(QOpenGLWidget):
         gates, where each gate leads to a real service out on the net."""
         if self.net is None:
             self.net = wirenet.Net()
-        relay = os.environ.get("MRFLUFFY_GATE_URL")
-        if relay and self.presence is None:
-            self._join_relay(relay)
+        # the relay is the player's own choice (env MRFLUFFY_GATE_URL still wins,
+        # already folded into self._relay_seeds): join the first seed it names.
+        seeds = _relay_seeds(self._relay_seeds)
+        if seeds and self.presence is None:
+            self._join_relay(seeds[0])
         self._net_probe_t = time.time()
         self._enter_exchange()
+
+    def _wire_presence(self):
+        """One presence for the whole wire world: a shell is ON the wire, not
+        just in the market. Every shell SERVES the wire — it hosts a door of
+        its own and dials whatever seeds it knows, and the seeds' gates pass
+        the word of shells they alone can hear. Hotspot, wifi, satellite: the
+        medium is a door, nothing more."""
+        if self.presence is None:
+            host = os.environ.get(NET_ADDR_ENV, "0.0.0.0")
+            try:
+                port = int(os.environ.get(NET_PORT_ENV, "17833"))
+            except (TypeError, ValueError):
+                port = 17833
+            self.presence = wiregate.Presence(addr=(host, port))
+            seeds = _relay_seeds(self._relay_seeds)
+            if seeds:
+                self.presence.doors = seeds
+            self.presence.start()
+            self.presence.start_beacon()
+            if self.presence.started:
+                self._ghost_line = self.presence.describe()
+        return self.presence
 
     def _join_relay(self, url):
         """Point our presence at a real relay out on the net, so the market crowd
@@ -3849,6 +4244,50 @@ class WireGLWidget(QOpenGLWidget):
             self._flash(f"joined the net relay at {url}")
         except Exception as e:
             self._flash(f"could not join {url}: {e}")
+
+    def reload_outward(self):
+        """Re-read the player's outward choice and apply it. The env var, if set,
+        still wins; the saved preference is next; the neutral default last."""
+        self._net_host = _wireset("net_host", NET_HOST_ENV, NET_DEFAULT_HOST)
+        self._relay_seeds = _wireset("relay_seeds", RELAY_ENV)
+        self._net_result = None
+        self._net_status = ""
+        if self.presence is not None:
+            try:
+                self.presence.doors = _relay_seeds(self._relay_seeds)
+            except Exception:
+                pass
+
+    def set_net_host(self, host):
+        """The address the outward gate really dials — the player's own choice,
+        saved to wiresettings.json. An env var still overrides it."""
+        host = (host or "").strip()
+        try:
+            st = wiresettings.load()
+            st["net_host"] = host
+            wiresettings.save(st)
+        except Exception:
+            pass
+        self.reload_outward()
+        if os.environ.get(NET_HOST_ENV, "").strip():
+            self._flash(f"outward gate \u2192 {self._net_host} (env {NET_HOST_ENV} wins)")
+        else:
+            self._flash(f"outward gate \u2192 {self._net_host}")
+
+    def set_relay_seeds(self, seeds):
+        """The mesh seeds the presence joins (the wire's own seeding) — your
+        choice, saved. An env var still overrides it; a seed takes effect on the
+        next join."""
+        seeds = (seeds or "").strip()
+        try:
+            st = wiresettings.load()
+            st["relay_seeds"] = seeds
+            wiresettings.save(st)
+        except Exception:
+            pass
+        self.reload_outward()
+        n = len(_relay_seeds(seeds))
+        self._flash(f"relay seeds saved ({n}) \u2014 applies on next join")
 
     # ---- the Exchange: the hall of gates out on the net --------------------
     def _exchange_gate_xz(self, angle, radius=None):
@@ -3880,12 +4319,18 @@ class WireGLWidget(QOpenGLWidget):
         self.pitch = -0.02
         if self.net is None:
             self.net = wirenet.Net()
+        self.gates = self._ring_gates()
         self._flash("the Exchange \u2014 gates stand on the ring; step into one to go out")
         self.web_changed.emit()
 
     def _leave_exchange(self):
         self.exchange = False
         self.service = None
+        self.service_kind = "search"
+        self.service_name = ""
+        self.service_url = ""
+        self.service_host = ""
+        self.service_search = ""
         self.web_page = None
         self.web_results = []
         self.web_query = ""
@@ -3908,6 +4353,46 @@ class WireGLWidget(QOpenGLWidget):
         self.active = 0
         self._flash("back on the pier \u2014 the Exchange is still out there")
         self.web_changed.emit()
+
+    def _exchange_to_word(self):
+        """Step out of the Exchange into the room of the Word (Learn Islam)."""
+        self._leave_exchange()
+        self._enter_word()
+        self._flash("the room of the Word \u2014 the chapters arrayed like stars; the "
+                    "Exchange is one gate back")
+
+    def _ring_angles(self, n):
+        """Lay n gates evenly around the ring, leaving a clear wedge at the
+        return gate (due +z) so the way home is never blocked. A lone gate lands
+        at -z, where DuckDuckGo always stood."""
+        gap = 0.55
+        span = 2 * math.pi - 2 * gap
+        return [(math.pi * 0.5 + gap + (i + 0.5) * span / n) % (2 * math.pi)
+                for i in range(n)]
+
+    def _ring_gates(self):
+        """The ring: the one search gate (DuckDuckGo) plus every pearl \u2014 the
+        stock ones (held fast) and the user's own. Layout is dressing; which
+        gates exist is the ring's real ground truth (wirepearls)."""
+        gates = [dict(g, kind="search", stock=True, url="") for g in EXCHANGE_GATES]
+        for p in wirepearls.all_pearls():
+            gates.append({"id": p["id"], "name": p["name"], "host": p.get("host", ""),
+                          "kind": "site", "url": p["url"], "blurb": p.get("blurb", ""),
+                          "search": p.get("search", ""), "stock": bool(p.get("stock"))})
+        gates.append({"id": EXCHANGE_WORD_GID, "name": "Learn Islam", "kind": "word",
+                      "url": "", "host": "", "search": "", "stock": True,
+                      "blurb": "the room of the Word \u2014 the Qur'an, read in the wire"})
+        ang = self._ring_angles(len(gates))
+        for g, a in zip(gates, ang):
+            g["angle"] = a
+        return gates
+
+    def refresh_pearls(self):
+        """Re-read the ring after a pearl was cast or uncast (the tab calls it)."""
+        self.gates = self._ring_gates()
+        if self.service is not None and self.service not in {g["id"] for g in self.gates}:
+            self._close_service()
+        self.update()
 
     def _exchange_step(self, dt):
         k = self.keys
@@ -3986,7 +4471,7 @@ class WireGLWidget(QOpenGLWidget):
         # the beacon you arrive by
         self._prism(0, 0, 1.2, 0.4, y, y + 18.0, 6, (0.05, 0.18, 0.30))
         # the service gates on the ring
-        for g in EXCHANGE_GATES:
+        for g in self.gates:
             self._draw_exchange_gate(g, t)
         # the return gate back to the pier, due +z
         rx, _, rz = EXCHANGE_RETURN_POS
@@ -4008,7 +4493,12 @@ class WireGLWidget(QOpenGLWidget):
         x, z = self._exchange_gate_xz(g["angle"])
         y = EXCHANGE_FLOOR_Y
         near = math.hypot(self.pos[0] - x, self.pos[2] - z) <= 9.0
-        col = (0.30, 0.80, 0.98) if near else (0.20, 0.52, 0.70)
+        if g.get("kind") == "site":          # a kept pearl: amber, not the cyan search
+            col = (0.95, 0.75, 0.30) if near else (0.55, 0.43, 0.16)
+        elif g.get("kind") == "word":        # back into the Word: a pale, quiet lens
+            col = (0.62, 0.88, 0.96) if near else (0.34, 0.58, 0.68)
+        else:                                 # the DuckDuckGo search gate: cyan
+            col = (0.30, 0.80, 0.98) if near else (0.20, 0.52, 0.70)
         self._cube(x, y + 1.2, z, 1.3, 2.4, 1.3, (col[0] * 0.3, col[1] * 0.3, col[2] * 0.3))
         r = 2.2 + 0.14 * math.sin(t * 1.4)
         # a tall lens of light: a doorway, not a figure
@@ -4043,7 +4533,7 @@ class WireGLWidget(QOpenGLWidget):
             if d <= radius and (best is None or d < best["d"]):
                 best = {"kind": kind, "d": d, **kw}
 
-        for g in EXCHANGE_GATES:
+        for g in self.gates:
             x, z = self._exchange_gate_xz(g["angle"])
             consider("service", x, z, 6.0, gate=g)
         if self.service is not None:
@@ -4052,13 +4542,18 @@ class WireGLWidget(QOpenGLWidget):
         consider("leave_exchange", EXCHANGE_RETURN_POS[0], EXCHANGE_RETURN_POS[2], 5.5)
         return best
 
-    # ---- the gates themselves: real services (for now, DuckDuckGo) ----------
+    # ---- the gates themselves: real services -------------------------------
     def _open_service(self, gid):
-        g = next((x for x in EXCHANGE_GATES if x["id"] == gid), None)
+        g = next((x for x in self.gates if x["id"] == gid), None)
         if g is None:
             return
         self.service = gid
         self.service_angle = g["angle"]
+        self.service_kind = g.get("kind", "search")
+        self.service_name = g["name"]
+        self.service_url = g.get("url", "")
+        self.service_host = g.get("host", "")
+        self.service_search = g.get("search", "")
         self.web_query = ""
         self.web_results = []
         self.web_answer = None
@@ -4075,7 +4570,11 @@ class WireGLWidget(QOpenGLWidget):
         self._pkt_i = 0
         self.web_tabs = []
         self.web_mono = None
-        self.web_status = f"{g['name']} \u2014 type a search and press Enter"
+        if self.service_kind == "site":
+            self.web_status = (f"{g['name']} \u2014 a kept site, served as text "
+                               f"(no browser) \u00b7 {g.get('url', '')}")
+        else:
+            self.web_status = f"{g['name']} \u2014 type a search and press Enter"
         # stand before the console, looking out along the wire to the far service
         a = g["angle"]
         r0 = EXCHANGE_GATE_R - 4.5
@@ -4085,8 +4584,71 @@ class WireGLWidget(QOpenGLWidget):
         self.flying = True
         if self.net is None:
             self.net = wirenet.Net()
-        self._flash(f"you step into {g['name']} \u2014 watch the packets leave the console")
-        self.web_changed.emit()
+        if self.service_kind == "site":
+            self._flash(f"you step into {g['name']} \u2014 reading {g.get('url', '')}")
+            self.web_changed.emit()
+            self._open_kept_site()
+        else:
+            self._flash(f"you step into {g['name']} \u2014 watch the packets leave the console")
+            self.web_changed.emit()
+
+    def _open_kept_site(self):
+        """Fetch a kept pearl for real and lay its text on the slab. The page is
+        wired as light by the same packet theatre the search uses."""
+        url = self.service_url
+        if not url:
+            return
+        self.web_mono = {"title": self.service_name, "url": url, "lines": None,
+                         "status": "reaching\u2026"}
+        self.web_scroll = 0
+        self.pkt = []
+        self.pkt_rows = []
+        self._pkt_q = []
+        self._pkt_i = 0
+        if self.net is None:
+            self.net = wirenet.Net()
+        self.web_job = self.net.ask("read", url, max_bytes=262144)
+
+    def _site_search(self):
+        """Search within a kept pearl. Most modern sites render search on the
+        client, which the standard library cannot run \u2014 so the default is a real
+        web search restricted to the site's own domain (site:host), served by the
+        same DuckDuckGo gate. A pearl may instead carry its own server-rendered
+        search URL (with {q}); then that is dialed directly."""
+        q = (self.web_query or "").strip()
+        if not q:
+            self.web_status = "type a question to search within this site"
+            return
+        self.pkt = []
+        self.pkt_rows = []
+        self._pkt_q = []
+        self._pkt_i = 0
+        tmpl = self.service_search
+        if tmpl and "{q}" in tmpl:
+            url = tmpl.replace("{q}", quote_plus(q))
+            self.web_mono = {"title": f"{self.service_name} \u2014 search: {q}",
+                             "url": url, "lines": None, "status": "reaching\u2026"}
+            self.web_results = []
+            self.web_tabs = []
+            if self.net is None:
+                self.net = wirenet.Net()
+            self.web_status = f"searching {self.service_host or self.service_name}\u2026"
+            self.web_job = self.net.ask("read", url, max_bytes=262144)
+            self.web_changed.emit()
+            return
+        host = self.service_host or (
+            self.service_url.split("//")[-1].split("/")[0] if self.service_url else "")
+        self.web_results = []
+        self.web_mono = None
+        self.web_tabs = []
+        self.web_hist = []
+        self.web_next = None
+        self.web_data = {"q": f"site:{host} {q}", "kl": "us-en"}
+        if self.net is None:
+            self.net = wirenet.Net()
+        self.web_status = (f"searching within {host} \u2014 real answers, via the "
+                           f"DuckDuckGo gate (site: restriction)\u2026")
+        self.web_job = self.net.ask("search", q, data=self.web_data)
 
     def _close_service(self):
         self.service = None
@@ -4104,6 +4666,11 @@ class WireGLWidget(QOpenGLWidget):
         self._pkt_i = 0
         self.web_tabs = []
         self.web_mono = None
+        self.service_kind = "search"
+        self.service_name = ""
+        self.service_url = ""
+        self.service_host = ""
+        self.service_search = ""
         a = self.service_angle
         self.pos = [(EXCHANGE_GATE_R + 4.0) * math.cos(a), EXCHANGE_FLOOR_Y + EYE,
                     (EXCHANGE_GATE_R + 4.0) * math.sin(a)]
@@ -4112,6 +4679,9 @@ class WireGLWidget(QOpenGLWidget):
     def _web_key(self, e):
         """Keys at a gate's console. Typing happens only while you stand at it."""
         k = e.key()
+        if k == Qt.Key.Key_N and not self._at_console():
+            self.pearl_menu.emit()               # N away from the console: the ring
+            return
         if k == Qt.Key.Key_Escape:
             if self.web_mono is not None:
                 self.web_mono = None
@@ -4151,6 +4721,8 @@ class WireGLWidget(QOpenGLWidget):
         return True
 
     def _web_search(self):
+        if self.service_kind == "site":
+            return self._site_search()          # search inside a kept pearl
         q = self.web_query.strip()
         if not q:
             self.web_status = "nothing typed yet \u2014 write a search first"
@@ -4237,10 +4809,12 @@ class WireGLWidget(QOpenGLWidget):
                                 "ip": got.get("ip")}
                 n = len(res)
                 page = len(self.web_hist) + 1
+                engine = (f"within {self.service_host or self.service_name}"
+                          if self.service_kind == "site" else "duckduckgo")
                 self.web_status = (
-                    f"duckduckgo \u00b7 page {page} \u00b7 {n} result{'' if n == 1 else 's'} \u00b7 "
+                    f"{engine} \u00b7 page {page} \u00b7 {n} result{'' if n == 1 else 's'} \u00b7 "
                     f"{got.get('ms', 0):.0f}ms \u00b7 {got.get('ip')} \u2014 fly to a tablet and press E"
-                    if n else f"duckduckgo \u00b7 page {page} \u00b7 no results here")
+                    if n else f"{engine} \u00b7 page {page} \u00b7 no results here")
             else:
                 self.web_results = []
                 self.web_next = None
@@ -4423,34 +4997,41 @@ class WireGLWidget(QOpenGLWidget):
         pr.setPen(QColor(90, 150, 160))
         pr.drawText(14, 36, "the hall past the outward gate  \u00b7  each gate leads to a real service")
         if self.service is not None:
-            self._hud_ddg(pr, now)
+            self._hud_service(pr, now)
             return
         n = self._nearest_exchange()
         pr.setPen(QColor(180, 200, 220))
         pr.drawText(14, 52, "you are in the Exchange   [on the net, for real]")
+        pearls = sum(1 for g in self.gates if g.get("kind") == "site")
+        pr.setPen(QColor(150, 235, 255))
+        pr.drawText(14, 68, f"[E] step into a gate  \u00b7  {len(self.gates)} on the ring "
+                            f"({pearls} kept pearl{'' if pearls == 1 else 's'})")
         if n and n["kind"] == "service":
             g = n["gate"]
             pr.setPen(QColor(150, 235, 255))
-            pr.drawText(14, h_ - 96, f"[E] step into {g['name']} \u2014 {g['blurb']}")
-        elif n and n["kind"] == "leave_exchange":
-            pr.setPen(QColor(255, 235, 150))
-            pr.drawText(14, h_ - 96, "[E] back to the wire")
-        pr.setPen(QColor(150, 190, 180))
-        pr.drawText(14, h_ - 118, "one gate hangs here for now \u2014 more will follow")
+            pr.drawText(14, h_ - 96, f"[E] {g['name']}  \u00b7  {g.get('blurb', '')}")
+        pr.setPen(QColor(120, 200, 160))
+        pr.drawText(14, h_ - 84, "[N] the pearl ring \u2014 cast or uncast a site of your own")
         pr.setPen(QColor(120, 235, 220))
         pr.drawText(14, h_ - 66, "WASD fly  \u00b7  Space/C up/down  \u00b7  E step in  \u00b7  Home leave the Exchange")
         if self._hud_msg and now < self._hud_until:
             pr.setPen(QColor(140, 245, 210))
             pr.drawText(14, h_ - 44, self._hud_msg[:118])
 
-    def _hud_ddg(self, pr: QPainter, now):
+    def _hud_service(self, pr: QPainter, now):
         w_, h_ = self.width(), self.height()
         at = self._at_console()
+        site = self.service_kind == "site"
         # the world stays visible under a light film — the packets are the show
         pr.fillRect(0, 0, w_, h_, QColor(0, 0, 0, 96))
         pr.setFont(QFont("Monospace", 9))
-        pr.setPen(QColor(150, 235, 255))
-        pr.drawText(14, 22, "THE EXCHANGE  //  DUCKDUCKGO  \u2014  watch the packets leave the console")
+        pr.setPen(QColor(150, 235, 255) if not site else QColor(255, 214, 130))
+        if site:
+            pr.drawText(14, 22, f"THE EXCHANGE  //  {self.service_name.upper()}  "
+                                "\u2014  a kept site, served as text (no browser)")
+        else:
+            pr.drawText(14, 22, f"THE EXCHANGE  //  {self.service_name.upper()}  "
+                                "\u2014  watch the packets leave the console")
         # the live packet ledger, down the right
         lx = w_ - 316
         ly = 44
@@ -4481,7 +5062,15 @@ class WireGLWidget(QOpenGLWidget):
             self._hud_mono(pr, now, w_, h_)
             return
         # the console line — only while you actually stand at it
-        if at:
+        if site and at:
+            caret = "\u2588" if int(now * 2) % 2 == 0 else " "
+            pr.setFont(QFont("Monospace", 13))
+            pr.setPen(QColor(255, 226, 160))
+            pr.drawText(20, h_ - 74, "\u25b8 " + self.web_query + caret)
+        elif site:
+            pr.setPen(QColor(255, 214, 130))
+            pr.drawText(20, h_ - 74, "fly to the console to search within this site")
+        elif at:
             caret = "\u2588" if int(now * 2) % 2 == 0 else " "
             pr.setFont(QFont("Monospace", 13))
             pr.setPen(QColor(205, 240, 255))
@@ -4493,9 +5082,15 @@ class WireGLWidget(QOpenGLWidget):
         pr.setPen(QColor(140, 200, 210))
         pr.drawText(20, h_ - 54, self.web_status[:118])
         pr.setPen(QColor(120, 235, 220))
-        pr.drawText(14, h_ - 34,
-                    "at the console: type + Enter  \u00b7  fly to a tablet + E to open  "
-                    "\u00b7  [ ] page  \u00b7  Esc  \u00b7  Home leave")
+        if site:
+            pr.drawText(14, h_ - 34,
+                        "at the console: type a question + Enter to search this site  "
+                        "\u00b7  fly to a tablet + E  \u00b7  [ ] page/scroll  \u00b7  "
+                        "N ring  \u00b7  Esc  \u00b7  Home leave")
+        else:
+            pr.drawText(14, h_ - 34,
+                        "at the console: type + Enter  \u00b7  fly to a tablet + E to open  "
+                        "\u00b7  [ ] page  \u00b7  N the pearl ring  \u00b7  Esc  \u00b7  Home leave")
 
     def _hud_tablets(self, pr, now, w_, h_):
         if not self.web_tabs:
@@ -4590,6 +5185,7 @@ class WireGLWidget(QOpenGLWidget):
             self._glyph_rain(now, spin=sp, dim=1.0)
             self._glyph_rain(now, spin=sp + 1.1, dim=0.62)
             self._deep_motes(now)
+            self._deep_beacon(now)
         elif not self.word and not self.exchange and not self.machine \
                 and not self.candles:
             self._glyph_rain(now)
@@ -5516,12 +6112,12 @@ class WireGLWidget(QOpenGLWidget):
                     "\u00b7 R the chapters \u00b7 Home leave the room")
 
     def _hud_word_select(self, pr, now, w_, h_):
-        """The cluster of chapters: the whole Book, hung like stars to fly to."""
+        """The cluster of chapters: the whole Book, arrayed like stars to fly to."""
         total = sum(len(s["ayahs"]) for s in self._word_suras)
         # title
         pr.setFont(QFont("Monospace", 14, QFont.Weight.Bold))
         fm = pr.fontMetrics()
-        title = "THE CHAPTERS, HUNG LIKE STARS"
+        title = "THE CHAPTERS, ARRAYED LIKE STARS"
         pr.setPen(QColor(150, 240, 228))
         pr.drawText((w_ - fm.horizontalAdvance(title)) // 2, h_ // 2 - 24, title)
         pr.setFont(QFont("Monospace", 10))
@@ -5531,7 +6127,8 @@ class WireGLWidget(QOpenGLWidget):
         pr.setPen(QColor(140, 210, 205))
         pr.drawText((w_ - fm.horizontalAdvance(sub)) // 2, h_ // 2 - 2, sub)
         hint = ("fly to a star and press E to open that chapter \u00b7 or press R for a "
-                "random chapter \u00b7 or pick any chapter from the list at right")
+                "random chapter \u00b7 or pick any chapter from the list at right \u00b7 "
+                "the amber gate leads out to IslamQA")
         pr.setPen(QColor(150, 190, 200))
         fm = pr.fontMetrics()
         pr.drawText((w_ - fm.horizontalAdvance(hint)) // 2, h_ // 2 + 20, hint)
@@ -5668,20 +6265,63 @@ class WireGLWidget(QOpenGLWidget):
             pr.drawText(14, 22, "SECTION 9  //  WIRE VISION  \u2014  THE DIVE")
             pr.setPen(QColor(90, 150, 160))
             pr.drawText(14, 36, "the sea of information  \u00b7  unbounded  \u00b7  carries no data")
-            big = "THE SEA OF INFORMATION"
-            pr.setFont(QFont("Monospace", 16))
+            # the one faint glow down here — a message drawn from nothing. It is
+            # not an entity and carries no data; fly toward it and the words gather.
+            bx, by, bz = self._deep_beacon_pos()
+            dist = math.sqrt((self.pos[0] - bx) ** 2 + (self.pos[1] - by) ** 2
+                             + (self.pos[2] - bz) ** 2)
+            near = max(0.0, 1.0 - dist / 420.0)
+            arrived = dist <= DEEP_BEACON_R
+            try:
+                sx, sy, sz = gluProject(bx, by, bz)
+            except Exception:
+                sx = sy = sz = -1.0
+            on_screen = (0.0 <= sz <= 1.0 and 0 <= sx <= w_ and 0 <= sy <= h_)
+            if on_screen and not arrived:
+                rad = 42.0 + 150.0 * (1.0 - near)
+                ga = int(max(8, min(150, 30 + 120 * near)))
+                grad = QRadialGradient(sx, sy, rad)
+                grad.setColorAt(0.0, QColor(165, 255, 228, ga))
+                grad.setColorAt(0.4, QColor(80, 220, 200, ga // 3))
+                grad.setColorAt(1.0, QColor(60, 200, 180, 0))
+                pr.setPen(Qt.PenStyle.NoPen)
+                pr.setBrush(QBrush(grad))
+                pr.drawEllipse(int(sx - rad), int(sy - rad), int(2 * rad), int(2 * rad))
+                pr.setBrush(Qt.BrushStyle.NoBrush)
+                wa = int(max(26, min(255, 50 + 205 * near)))
+                pr.setFont(QFont("Monospace", 11))
+                wfm = pr.fontMetrics()
+                pr.setPen(QColor(180, 255, 240, wa))
+                pr.drawText(int(sx - wfm.horizontalAdvance(DEEP_BEACON_WORDS) / 2),
+                            int(sy + 4), DEEP_BEACON_WORDS)
+                pr.setFont(f)
+            if arrived:
+                pr.setFont(QFont("Monospace", 20))
+                bfm = pr.fontMetrics()
+                pr.setPen(QColor(195, 255, 238, 248))
+                pr.drawText((w_ - bfm.horizontalAdvance(DEEP_BEACON_WORDS)) // 2,
+                            h_ // 2 - 34, DEEP_BEACON_WORDS)
+                pr.setFont(f)
+                bfm = pr.fontMetrics()
+                pr.setPen(QColor(150, 205, 195, 220))
+                cap = "a message drawn from nothing \u2014 the sea carries no data"
+                pr.drawText((w_ - bfm.horizontalAdvance(cap)) // 2, h_ // 2 - 10, cap)
+            else:
+                big = "THE SEA OF INFORMATION"
+                pr.setFont(QFont("Monospace", 16))
+                fm = pr.fontMetrics()
+                pr.setPen(QColor(150, 255, 210, 235))
+                pr.drawText((w_ - fm.horizontalAdvance(big)) // 2, h_ // 2 - 8, big)
+                pr.setFont(f)
             fm = pr.fontMetrics()
-            pr.setPen(QColor(150, 255, 210, 235))
-            pr.drawText((w_ - fm.horizontalAdvance(big)) // 2, h_ // 2 - 8, big)
-            pr.setFont(f)
-            fm = pr.fontMetrics()
+            ybase = h_ // 2 + (30 if arrived else 14)
             line = (f"depth {int(self.deep['d'])}  \u00b7  no named entity lives below "
                     f"the edge \u2014 every shell is above you now")
             pr.setPen(QColor(150, 205, 195, 225))
-            pr.drawText((w_ - fm.horizontalAdvance(line)) // 2, h_ // 2 + 14, line)
+            pr.drawText((w_ - fm.horizontalAdvance(line)) // 2, ybase, line)
             pr.setPen(QColor(255, 235, 150))
-            p2 = "[E] rise to the edge \u00b7 [Home] surface"
-            pr.drawText((w_ - fm.horizontalAdvance(p2)) // 2, h_ // 2 + 34, p2)
+            p2 = "WASD steer \u00b7 Space/C rise-sink \u00b7 [E] rise to the edge \u00b7 [Home] surface"
+            pr.drawText((w_ - fm.horizontalAdvance(p2)) // 2, ybase + 20, p2)
             if self._hud_msg and now < self._hud_until:
                 pr.setPen(QColor(120, 230, 180))
                 tw = fm.horizontalAdvance(self._hud_msg)
@@ -5723,6 +6363,33 @@ class WireGLWidget(QOpenGLWidget):
             pr.setPen(QColor(235, 170, 90))
             pr.drawText(14, 88, "\u25f7 " + str(mem.get("note", ""))
                                 + f"  (last observed {mem.get('newest', '?')})")
+        # ---- the wire: other shells on the net, over whatever medium ----
+        pres = self.presence
+        url = ""
+        if pres is not None:
+            url = getattr(pres, "advertise_url", "")
+        serve = f"serving our door: {url}" if url else \
+            "serve a door (MRFLUFFY_WIRE_URL) to be dialable by the mesh"
+        pr.setPen(QColor(150, 205, 235))
+        if self._wire_online or self._wire_peers:
+            pl = self._wire_peers
+            names = ", ".join(p["name"] for p in pl[:4])
+            more = f" +{len(pl) - 4}" if len(pl) > 4 else ""
+            ago = ""
+            if pl and all("t" in p for p in pl):
+                ago = f" \u00b7 newest seen {min(int(time.time() - p['t']) for p in pl)}s ago"
+            if pl:
+                pr.drawText(14, 104,
+                            f"THE WIRE \u00b7 {len(pl)} shell{'s' if len(pl) != 1 else ''} "
+                            f"hear the net: {names}{more}")
+            else:
+                pr.drawText(14, 104, "THE WIRE \u00b7 on the wire \u2014 no other shell heard yet")
+            pr.drawText(14, 118, serve + ago)
+        else:
+            pr.drawText(14, 104, "THE WIRE \u00b7 off this shell (no door bound, no seed answered)")
+            pr.drawText(14, 118,
+                        "join seeds (MRFLUFFY_GATE_URL=a,b + MRFLUFFY_WIRE_KEY): "
+                        "then the whole net is one wire")
         # ---- ghost-line readout (top-right) ----
         if self.world:
             fm = pr.fontMetrics()
@@ -5789,6 +6456,15 @@ class WireGLWidget(QOpenGLWidget):
             pr.setPen(QColor(255, 235, 150))
             tw = pr.fontMetrics().horizontalAdvance(prompt)
             pr.drawText((w_ - tw) // 2, h_ - 96, prompt)
+        # the one real handoff: stand by a device in flight and P hands it a file
+        if self.flying and not self.deliver_open:
+            dev = self._nearest_device()
+            if dev is not None:
+                pr.setPen(QColor(255, 205, 150))
+                line = (f"[P] hand a file to {dev.get('label') or 'a device'} "
+                        f"over the wifi")
+                tw = pr.fontMetrics().horizontalAdvance(line)
+                pr.drawText((w_ - tw) // 2, h_ - 78, line)
         # the outward gate's real answer, shown while you stand near it
         if (self.active == 0 and self.world and not self.market and not self.word
                 and self.deep is None
@@ -5817,6 +6493,19 @@ class WireGLWidget(QOpenGLWidget):
             self._stop_capture()
         except Exception:
             pass
+        try:
+            self.deliver.stop()
+        except Exception:
+            pass
+        try:
+            if self.presence is not None:
+                try:
+                    self.presence.leave()
+                except Exception:
+                    pass
+                self.presence.stop()
+        except Exception:
+            pass
 
 
 class WireVisionTab(QWidget):
@@ -5829,6 +6518,7 @@ class WireVisionTab(QWidget):
         super().__init__(parent)
         self.world = None
         self._fs = False
+        self._scenarios_on = False
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
 
@@ -5839,6 +6529,13 @@ class WireVisionTab(QWidget):
         self.b_machine.setToolTip("Step down into THIS host \u2014 its doors, roads and "
                                   "inhabitants read live from /proc and the local logs "
                                   "(also: the hatch on the wire floor, due +z)")
+        self.b_wifi = QPushButton("\u2601 wifi apron")
+        self.b_wifi.setToolTip("The wifi networks the radio last saw \u2014 reachable, "
+                               "and joinable (a real, gated connect). Also on the floor: "
+                               "fly up to a network mote and press E.")
+        self.b_pearls = QPushButton("\u25cb the pearl ring")
+        self.b_pearls.setToolTip("The sites kept on a ring in the Exchange \u2014 cast "
+                                 "your own pearl, uncast it. Also in the Exchange: press N.")
         self.cb_real = QCheckBox("show real names")
         self.cb_real.setToolTip("Reveal the technical term for every place (level the field)")
         self.cb_live = QComboBox()
@@ -5854,6 +6551,8 @@ class WireVisionTab(QWidget):
         self.where = QLabel("not built yet — click 'Build the wire'")
         bar.addWidget(self.b_build)
         bar.addWidget(self.b_machine)
+        bar.addWidget(self.b_wifi)
+        bar.addWidget(self.b_pearls)
         bar.addWidget(self.cb_live)
         bar.addWidget(self.cb_real)
         bar.addWidget(self.b_full)
@@ -5972,7 +6671,30 @@ class WireVisionTab(QWidget):
             "QPushButton:hover{background:rgba(32,56,66,240);}")
         self.menu_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.menu_btn.clicked.connect(self._open_game_menu)
-        self.deck.add_overlay(self.menu_btn, "top-left")
+
+        # a "scenarios" toggle sat right beside the menu: the six-scenario read
+        # no longer rides the sky — it is a panel you show or hide at will.
+        self.scenario_btn = QPushButton("scenarios")
+        self.scenario_btn.setCheckable(True)
+        self.scenario_btn.setToolTip("Show blackhorse's own six-scenario SignalBot "
+                                     "rubric \u2014 replayed from its files, never run "
+                                     "here (show/hide)")
+        self.scenario_btn.setStyleSheet(
+            "QPushButton{background:rgba(20,34,40,225);color:#8be0ff;"
+            "border:1px solid #2a4a55;border-radius:4px;padding:6px 12px;}"
+            "QPushButton:hover{background:rgba(32,56,66,240);}"
+            "QPushButton:checked{background:rgba(30,74,66,240);color:#9dffd8;"
+            "border:1px solid #3a7a66;}")
+        self.scenario_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.scenario_btn.clicked.connect(self._toggle_scenarios)
+        # keep menu + scenarios together on the one top-left slot
+        self.tools_bar = QWidget()
+        tbl = QHBoxLayout(self.tools_bar)
+        tbl.setContentsMargins(0, 0, 0, 0)
+        tbl.setSpacing(6)
+        tbl.addWidget(self.menu_btn)
+        tbl.addWidget(self.scenario_btn)
+        self.deck.add_overlay(self.tools_bar, "top-left")
 
         self.game_menu = _GameMenu()
         self.game_menu.setObjectName("gameMenu")
@@ -5995,6 +6717,39 @@ class WireVisionTab(QWidget):
         self.game_menu.escape.connect(self._close_game_menu)
         self.deck.add_overlay(self.game_menu, "center")
 
+        # ---- the six scenarios — a panel, not sky text (toggle: the button) ----
+        self.scenario_panel = QFrame()
+        self.scenario_panel.setObjectName("scenarioPanel")
+        self.scenario_panel.setFixedWidth(460)
+        self.scenario_panel.setStyleSheet(
+            "QFrame#scenarioPanel{border:1px solid #2a5a66;border-radius:10px;"
+            "background:rgba(6,14,18,246);}"
+            "QFrame#scenarioPanel QLabel{color:#cfe6e3;background:transparent;}"
+            "QFrame#scenarioPanel QPushButton{background:#0e1c22;border:1px solid #2a5a66;"
+            "border-radius:4px;padding:4px 8px;color:#bfe9ff;}"
+            "QFrame#scenarioPanel QTextBrowser{background:transparent;border:none;"
+            "color:#cfe6e3;}")
+        spv = QVBoxLayout(self.scenario_panel)
+        spv.setContentsMargins(12, 10, 12, 10); spv.setSpacing(6)
+        sph = QHBoxLayout()
+        spt = QLabel("THE SIX SCENARIOS \u00b7 blackhorse's own rubric, replayed")
+        spt.setStyleSheet("color:#8be0ff;font-weight:bold;")
+        spx = QPushButton("\u2715")
+        spx.setFixedWidth(28)
+        spx.setToolTip("Hide the scenarios (the 'scenarios' button brings it back)")
+        spx.setStyleSheet("background:transparent;color:#8be0ff;border:1px solid #2a5a66;"
+                          "border-radius:4px;font-weight:bold;")
+        spx.clicked.connect(lambda: self._set_scenarios(False))
+        sph.addWidget(spt); sph.addStretch(1); sph.addWidget(spx)
+        spv.addLayout(sph)
+        self.scenario_body = QTextBrowser()
+        self.scenario_body.setOpenExternalLinks(False)
+        self.scenario_body.setMinimumHeight(380)
+        self.scenario_body.setMaximumHeight(560)
+        spv.addWidget(self.scenario_body)
+        self.scenario_panel.setVisible(False)
+        self.deck.add_overlay(self.scenario_panel, "top-left-below")
+
         # quick travel + actions for a reader who does not want to fly to a gate
         self.word_bar = QWidget()
         wbl = QHBoxLayout(self.word_bar)
@@ -6015,6 +6770,212 @@ class WireVisionTab(QWidget):
             wbl.addWidget(_b)
         self.word_bar.setVisible(False)
         self.deck.add_overlay(self.word_bar, "bottom-center")
+
+        # ---- the one real handoff: hand a file to a device over the wifi ----
+        # Hidden by design: flight first (G), then P beside a device opens it.
+        self.deliver_panel = QFrame()
+        self.deliver_panel.setObjectName("deliverPanel")
+        self.deliver_panel.setFixedWidth(360)
+        self.deliver_panel.setStyleSheet(
+            "QFrame#deliverPanel{border:1px solid #7a5a2a;border-radius:10px;"
+            "background:rgba(12,10,8,242);}"
+            "QFrame#deliverPanel QLabel{color:#cfe3dd;background:transparent;}"
+            "QFrame#deliverPanel QPushButton{background:#241a10;border:1px solid #7a5a2a;"
+            "border-radius:4px;padding:5px 8px;color:#cfe3dd;}"
+            "QFrame#deliverPanel QPushButton:hover{background:#3a2d1a;}"
+            "QFrame#deliverPanel QPushButton:disabled{color:#4a4437;}"
+            "QFrame#deliverPanel QLineEdit{background:#0a1216;color:#8be0ff;"
+            "border:1px solid #2a4a55;border-radius:4px;padding:2px;}")
+        dpv = QVBoxLayout(self.deliver_panel)
+        dpv.setContentsMargins(12, 10, 12, 10); dpv.setSpacing(6)
+        dph = QHBoxLayout()
+        dp_t = QLabel("THE WIRE \u00b7 hand a file to a device")
+        dp_t.setStyleSheet("color:#ffcd96;font-weight:bold;")
+        dp_x = QPushButton("\u2715")
+        dp_x.setFixedWidth(28)
+        dp_x.setToolTip("Close (the phone can keep pulling the file)")
+        dp_x.setStyleSheet("background:transparent;color:#ffcd96;border:1px solid #7a5a2a;"
+                           "border-radius:4px;font-weight:bold;")
+        dp_x.clicked.connect(self._close_deliver)
+        dph.addWidget(dp_t); dph.addStretch(1); dph.addWidget(dp_x)
+        dpv.addLayout(dph)
+        self.deliver_target = QLabel("target: \u2014")
+        self.deliver_target.setWordWrap(True)
+        self.deliver_file = QLabel("no file picked")
+        self.deliver_file.setWordWrap(True)
+        self.deliver_url = QLineEdit()
+        self.deliver_url.setReadOnly(True)
+        self.deliver_url.setText("pick a file, then hand it")
+        dp_pick = QPushButton("pick an image\u2026")
+        dp_pick.clicked.connect(self._deliver_pick)
+        dp_go = QPushButton("hand it over \u2014 serve on the wifi")
+        dp_go.clicked.connect(self._deliver_start)
+        dp_go.setEnabled(False)
+        self._dp_go = dp_go
+        self.deliver_qr = QLabel()
+        self.deliver_qr.setFixedSize(180, 180)
+        self.deliver_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.deliver_note = QLabel(
+            "same wifi only \u2014 the phone opens this URL (or scans the QR) and "
+            "pulls the file down. Nothing is pushed, nothing is compromised. "
+            "Closing the panel keeps it live until \u2018stop\u2019.")
+        self.deliver_note.setWordWrap(True)
+        self.deliver_note.setStyleSheet("color:#6b8a91;")
+        dp_stop = QPushButton("stop serving")
+        dp_stop.clicked.connect(self._deliver_stop)
+        dpv.addWidget(self.deliver_target)
+        dpv.addWidget(self.deliver_file)
+        dpv.addWidget(dp_pick)
+        dpv.addWidget(dp_go)
+        dpv.addWidget(self.deliver_url)
+        dpv.addWidget(self.deliver_qr, 0, Qt.AlignmentFlag.AlignHCenter)
+        dpv.addWidget(self.deliver_note)
+        dpv.addWidget(dp_stop)
+        self.deliver_panel.setVisible(False)
+        self.deck.add_overlay(self.deliver_panel, "center")
+        self._deliver_esc = QShortcut(QKeySequence("Esc"), self.deliver_panel)
+        self._deliver_esc.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self._deliver_esc.activated.connect(self._close_deliver)
+
+        # ---- the wifi apron: reachable networks, and a gated real join ----
+        # Opens when you fly to a network mote and press E (or the menu button).
+        self.wifi_panel = QFrame()
+        self.wifi_panel.setObjectName("wifiPanel")
+        self.wifi_panel.setFixedWidth(420)
+        self.wifi_panel.setStyleSheet(
+            "QFrame#wifiPanel{border:1px solid #2a5a66;border-radius:10px;"
+            "background:rgba(8,14,16,244);}"
+            "QFrame#wifiPanel QLabel{color:#cfe6e3;background:transparent;}"
+            "QFrame#wifiPanel QPushButton{background:#0e1c22;border:1px solid #2a5a66;"
+            "border-radius:4px;padding:5px 8px;color:#bfe9ff;}"
+            "QFrame#wifiPanel QPushButton:hover{background:#16303a;}"
+            "QFrame#wifiPanel QPushButton:disabled{color:#40505a;}"
+            "QFrame#wifiPanel QListWidget{background:#08161a;color:#8be0ff;"
+            "border:1px solid #1e4650;border-radius:4px;}"
+            "QFrame#wifiPanel QLineEdit{background:#08161a;color:#8be0ff;"
+            "border:1px solid #2a5a66;border-radius:4px;padding:3px;}")
+        wv = QVBoxLayout(self.wifi_panel)
+        wv.setContentsMargins(12, 10, 12, 10); wv.setSpacing(6)
+        wh = QHBoxLayout()
+        wt = QLabel("THE WIRE \u00b7 the wifi apron")
+        wt.setStyleSheet("color:#9fe8ff;font-weight:bold;")
+        wx = QPushButton("\u2715")
+        wx.setFixedWidth(28)
+        wx.setToolTip("Close (the apron is only a readout until you connect)")
+        wx.setStyleSheet("background:transparent;color:#9fe8ff;border:1px solid #2a5a66;"
+                         "border-radius:4px;font-weight:bold;")
+        wx.clicked.connect(self._close_wifi_panel)
+        wh.addWidget(wt); wh.addStretch(1); wh.addWidget(wx)
+        wv.addLayout(wh)
+        self.wifi_on = QLabel("on: \u2014")
+        wv.addWidget(self.wifi_on)
+        self.wifi_list = QListWidget()
+        self.wifi_list.setFixedHeight(150)
+        self.wifi_list.currentRowChanged.connect(self._wifi_selected)
+        wv.addWidget(self.wifi_list)
+        self.wifi_detail = QLabel("no network selected")
+        self.wifi_detail.setWordWrap(True)
+        wv.addWidget(self.wifi_detail)
+        self.wifi_pass = QLineEdit()
+        self.wifi_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        self.wifi_pass.setPlaceholderText("password (secured network)")
+        self.wifi_pass.setVisible(False)
+        wv.addWidget(self.wifi_pass)
+        wrow = QHBoxLayout()
+        self.wifi_go = QPushButton("connect")
+        self.wifi_go.clicked.connect(self._wifi_connect_action)
+        self.wifi_refresh = QPushButton("rescan the radio")
+        self.wifi_refresh.setToolTip("re-read the radio's own last scan (\u2014rescan no)")
+        self.wifi_refresh.clicked.connect(self._wifi_refresh_action)
+        wrow.addWidget(self.wifi_go); wrow.addWidget(self.wifi_refresh)
+        wv.addLayout(wrow)
+        self.wifi_note = QLabel(
+            "Read from the radio's own last scan \u2014 a memory, never a probe of "
+            "our own; every SSID here is the radio's real sighting. Connecting is a "
+            "real NetworkManager join and can change your uplink; it never attacks "
+            "anything.")
+        self.wifi_note.setWordWrap(True)
+        self.wifi_note.setStyleSheet("color:#6b8a91;")
+        wv.addWidget(self.wifi_note)
+        self.wifi_panel.setVisible(False)
+        self.deck.add_overlay(self.wifi_panel, "center")
+        self._wifi_esc = QShortcut(QKeySequence("Esc"), self.wifi_panel)
+        self._wifi_esc.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self._wifi_esc.activated.connect(self._close_wifi_panel)
+        # apron state + the off-main-thread join poll (the panel drives real nmcli)
+        self._wifi_open = None
+        self._wifi_confirm = False
+        self._wifi_busy = False
+        self._wifi_join_result = None
+        self._wifi_timer = QTimer(self)
+        self._wifi_timer.setInterval(500)
+        self._wifi_timer.timeout.connect(self._wifi_poll)
+        self._wifi_timer.start()
+
+        # ---- the pearl ring: the sites kept behind gates in the Exchange ----
+        # Stock pearls (IslamQA) are held fast; your own can be cast and uncast.
+        self.pearl_panel = QFrame()
+        self.pearl_panel.setObjectName("pearlPanel")
+        self.pearl_panel.setFixedWidth(460)
+        self.pearl_panel.setStyleSheet(
+            "QFrame#pearlPanel{border:1px solid #6a5528;border-radius:10px;"
+            "background:rgba(14,12,7,244);}"
+            "QFrame#pearlPanel QLabel{color:#efe3cf;background:transparent;}"
+            "QFrame#pearlPanel QPushButton{background:#241c0e;border:1px solid #6a5528;"
+            "border-radius:4px;padding:5px 8px;color:#ffe0a6;}"
+            "QFrame#pearlPanel QPushButton:hover{background:#3a2d16;}"
+            "QFrame#pearlPanel QPushButton:disabled{color:#5a523f;}"
+            "QFrame#pearlPanel QListWidget{background:#120f08;color:#ffd98a;"
+            "border:1px solid #4a3a1c;border-radius:4px;}"
+            "QFrame#pearlPanel QLineEdit{background:#120f08;color:#ffd98a;"
+            "border:1px solid #4a3a1c;border-radius:4px;padding:3px;}")
+        pv = QVBoxLayout(self.pearl_panel)
+        pv.setContentsMargins(12, 10, 12, 10); pv.setSpacing(6)
+        ph = QHBoxLayout()
+        pt = QLabel("THE EXCHANGE \u00b7 the pearl ring")
+        pt.setStyleSheet("color:#ffd98a;font-weight:bold;")
+        px = QPushButton("\u2715")
+        px.setFixedWidth(28)
+        px.setToolTip("Close (the ring is unchanged until you cast or uncast)")
+        px.setStyleSheet("background:transparent;color:#ffd98a;border:1px solid #6a5528;"
+                         "border-radius:4px;font-weight:bold;")
+        px.clicked.connect(self._close_pearl_panel)
+        ph.addWidget(pt); ph.addStretch(1); ph.addWidget(px)
+        pv.addLayout(ph)
+        self.pearl_list = QListWidget()
+        self.pearl_list.setFixedHeight(150)
+        self.pearl_list.currentRowChanged.connect(self._pearl_selected)
+        pv.addWidget(self.pearl_list)
+        prow = QHBoxLayout()
+        self.pearl_name = QLineEdit()
+        self.pearl_name.setPlaceholderText("name (e.g. Internet Archive)")
+        self.pearl_url = QLineEdit()
+        self.pearl_url.setPlaceholderText("https://\u2026")
+        prow.addWidget(self.pearl_name, 2); prow.addWidget(self.pearl_url, 3)
+        pv.addLayout(prow)
+        pbrow = QHBoxLayout()
+        self.pearl_add = QPushButton("\u2726 cast a pearl")
+        self.pearl_add.clicked.connect(self._pearl_add_action)
+        self.pearl_del = QPushButton("\u2715 uncast the selected")
+        self.pearl_del.clicked.connect(self._pearl_del_action)
+        self.pearl_del.setEnabled(False)
+        pbrow.addWidget(self.pearl_add); pbrow.addWidget(self.pearl_del)
+        pv.addLayout(pbrow)
+        self.pearl_note = QLabel(
+            "Each pearl is a gate on the Exchange ring: fly to it, step in, and the "
+            "page is fetched for real (standard library, no browser, no JavaScript, "
+            "no images \u2014 text only) and served as text. At the gate's console, type "
+            "a question + Enter to search within the site (a real search restricted "
+            "to its own domain). The stock pearl is held fast \u2014 it can never be "
+            "deleted; your own pearls can.")
+        self.pearl_note.setWordWrap(True)
+        self.pearl_note.setStyleSheet("color:#9a8a68;")
+        pv.addWidget(self.pearl_note)
+        self.pearl_panel.setVisible(False)
+        self.deck.add_overlay(self.pearl_panel, "center")
+        self._pearl_esc = QShortcut(QKeySequence("Esc"), self.pearl_panel)
+        self._pearl_esc.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self._pearl_esc.activated.connect(self._close_pearl_panel)
 
         split.addWidget(right)
         split.setStretchFactor(0, 3)
@@ -6037,9 +6998,14 @@ class WireVisionTab(QWidget):
         self.gl.web_changed.connect(self._refresh_word_ui)
         self.gl.machine_changed.connect(self._refresh_machine_ui)
         self.gl.live_changed.connect(self._refresh_live_ui)
+        self.gl.deliver_toggle.connect(self._toggle_deliver)
+        self.gl.wifi_chosen.connect(self._on_wifi_chosen)
         self.cb_live.currentIndexChanged.connect(self._on_live_change)
         self._refresh_live_ui(self.gl.live_mode, self.gl.live_effective)
         self.b_machine.clicked.connect(self._machine_btn)
+        self.b_wifi.clicked.connect(self._toggle_wifi_panel)
+        self.b_pearls.clicked.connect(self._toggle_pearl_panel)
+        self.gl.pearl_menu.connect(self._toggle_pearl_panel)
         self.bw_prev.clicked.connect(lambda: self._word_btn(self.gl.word_prev))
         self.bw_next.clicked.connect(lambda: self._word_btn(self.gl.word_next))
         self.bw_chapters.clicked.connect(lambda: self._word_btn(self.gl.word_back_to_chapters))
@@ -6053,6 +7019,14 @@ class WireVisionTab(QWidget):
         self._fs_sc = QShortcut(QKeySequence("F11"), self)
         self._fs_sc.setContext(Qt.ShortcutContext.WindowShortcut)
         self._fs_sc.activated.connect(self.toggle_fullscreen)
+        self._scen_esc = QShortcut(QKeySequence("Esc"), self.scenario_panel)
+        self._scen_esc.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self._scen_esc.activated.connect(lambda: self._set_scenarios(False))
+        # the panel stays live while it is open (the bot's own files, re-read)
+        self._scen_timer = QTimer(self)
+        self._scen_timer.setInterval(3000)
+        self._scen_timer.timeout.connect(self._refresh_scenarios)
+        self._scen_timer.start()
         self._render_codex()
         # first build on the next event-loop turn so the widget is realized
         QTimer.singleShot(300, self.build)
@@ -6114,6 +7088,83 @@ class WireVisionTab(QWidget):
         else:
             self._open_game_menu()
 
+    # ---- the scenarios panel: blackhorse's six-scenario read, show/hide -------
+    def _toggle_scenarios(self):
+        self._set_scenarios(not self._scenarios_on)
+
+    def _set_scenarios(self, on):
+        on = bool(on)
+        self._scenarios_on = on
+        self.scenario_btn.setChecked(on)
+        self.scenario_panel.setVisible(on)
+        if on:
+            self._refresh_scenarios()
+            try:
+                self.gl.keys.clear()          # stop held movement while reading
+                self.gl.set_look_lock(False)  # free the mouse for scroll + close
+            except Exception:
+                pass
+        else:
+            try:
+                self.gl.set_look_lock(True)
+            except Exception:
+                pass
+        self._reflow_overlays()
+        try:
+            self.gl.setFocus()
+        except Exception:
+            pass
+
+    def _refresh_scenarios(self):
+        """Rebuild the panel text from blackhorse's own files. It only replays
+        what the bot already wrote — it never runs the bot and never trades."""
+        if not self._scenarios_on:
+            return
+        try:
+            sc = wiregate.scenarios()
+        except Exception:
+            sc = None
+        if not sc or not sc.get("rubric"):
+            self.scenario_body.setHtml(
+                "<span style='color:#9eb8c2'>no scenario read on file "
+                "(blackhorse's signalbot has not written a snapshot yet)</span>")
+            return
+        # which interval currently sits in which scenario ("5/6" lights 5 and 6)
+        active = {}
+        for r in sc.get("rows", []):
+            tok = str(r.get("scenario") or "none").split(":", 1)[0].strip()
+            active.setdefault(tok, []).append(r["interval"])
+
+        def tags(n):
+            ivs = []
+            for tok, lst in active.items():
+                if tok == n or (tok == "5/6" and n in ("5", "6")):
+                    ivs += lst
+            return sorted(set(ivs), key=lambda x: (int(str(x).rstrip("m"))
+                                                   if str(x).rstrip("m").isdigit() else 9e9, x))
+
+        out = []
+        nowline = "   ".join(f"{r['interval']}\u2192{r['scenario']}"
+                             for r in sc.get("rows", []))
+        out.append("<div style='color:#ffcd96'>active now:  "
+                   + (html.escape(nowline) if nowline else "no signal on file")
+                   + "</div>")
+        for n in sorted({r["note"] for r in sc.get("rows", []) if r.get("note")}):
+            out.append("<div style='color:#9eb8c2'>&nbsp;&nbsp;" + html.escape(n) + "</div>")
+        out.append("<div style='height:8px'></div>")
+        for s in sc.get("rubric", []):
+            ivs = tags(s["n"])
+            lines = str(s.get("text") or f"Scenario {s['n']} \u2014 {s['title']}").split("\n")
+            head = html.escape(lines[0])
+            if ivs:
+                head += ("&nbsp;&nbsp;&nbsp;<span style='color:#9dffd8'>\u25c0 active: "
+                         + ", ".join(ivs) + "</span>")
+            col = "#9dffd8" if ivs else "#c2d6db"
+            out.append(f"<div style='color:{col};font-weight:bold'>{head}</div>")
+            for extra in lines[1:]:
+                out.append(f"<div style='color:#9eb8c2'>{html.escape(extra)}</div>")
+        self.scenario_body.setHtml("".join(out))
+
     def _reflow_overlays(self):
         """An overlay floats over a QOpenGLWidget. After showing, hiding, or
         resizing one, nudge the whole stack so it composes at once \u2014 otherwise the
@@ -6124,6 +7175,8 @@ class WireVisionTab(QWidget):
         self.deck.place_overlays()
         self.game_menu.update()
         self.menu_btn.update()
+        self.scenario_btn.update()
+        self.scenario_panel.update()
         self.deck.update()
         self.gl.update()
         win = self.window()
@@ -6232,6 +7285,24 @@ class WireVisionTab(QWidget):
         cb.currentIndexChanged.connect(lambda _i: self._gm_set_live(cb.currentData()))
         self._gm_row("Live vision", cb)
 
+        self._gm_title("\u21d2  THE OUTWARD CONNECTION",
+                       "Your choice \u2014 never hardcoded. An environment variable "
+                       "(MRFLUFFY_NET_HOST / MRFLUFFY_GATE_URL) still overrides it.")
+        nh = QLineEdit(self.gl._net_host)
+        nh.setPlaceholderText(NET_DEFAULT_HOST)
+        nh.setToolTip("The one address the outward pier gate really dials "
+                      "(real DNS + HTTP/HTTPS, no browser). Blank = the neutral "
+                      "default. Press Enter to apply.")
+        nh.editingFinished.connect(lambda: self._gm_set_net_host(nh.text()))
+        self._gm_row("Outward target", nh)
+
+        rs = QLineEdit(self.gl._relay_seeds)
+        rs.setPlaceholderText("https://host:port, https://other:port")
+        rs.setToolTip("Comma-separated mesh doors the presence joins (the wire's "
+                      "own seeding). Blank = serve a door only. Press Enter to apply.")
+        rs.editingFinished.connect(lambda: self._gm_set_relay(rs.text()))
+        self._gm_row("Relay seeds", rs)
+
         rn = QCheckBox("Show real names (the technical term for every place)")
         rn.setChecked(bool(self.gl.show_real))
         rn.toggled.connect(self._gm_set_real)
@@ -6258,6 +7329,7 @@ class WireVisionTab(QWidget):
             ("Candle room (at the column)", "E  then  1-4  \u00b7  Esc cancels"),
             ("The Word (Qur'an)", "[  prev ayah  \u00b7  ]  next  \u00b7  R  random"),
             ("The machine (this host)", "X x-ray  \u00b7  K arm  \u00b7  L release  \u00b7  M auto"),
+            ("The dive (past the electron)", "WASD steer \u00b7 Space/C rise-sink \u00b7 E rise \u00b7 Home surface"),
         ]
         html = ["<table cellspacing='0' cellpadding='3' width='100%'>"]
         for k, v in rows:
@@ -6303,6 +7375,16 @@ class WireVisionTab(QWidget):
     def _gm_set_look(self, v):
         self.gl.look_sens = _clampf(v, 0.2, 3.0, 1.0)
         self._gm_save()
+
+    def _gm_set_net_host(self, text):
+        self.gl.set_net_host(text)
+        self.gl.setFocus()
+        self._reflow_overlays()
+
+    def _gm_set_relay(self, text):
+        self.gl.set_relay_seeds(text)
+        self.gl.setFocus()
+        self._reflow_overlays()
 
     def _gm_set_real(self, on):
         self.gl.show_real = bool(on)
@@ -6382,6 +7464,7 @@ class WireVisionTab(QWidget):
         except Exception as e:
             self.where.setText(f"build failed: {e}")
             return
+        self._wifi = None                    # re-read the radio's wifi apron
         self.gl.show_real = self.cb_real.isChecked()
         self.gl.set_world(self.world)
         self.where.setText(f"built · fp {self.world.get('fingerprint')} · "
@@ -6499,6 +7582,338 @@ class WireVisionTab(QWidget):
     def _set_menu(self, on):
         self._menu_visible = on
         self.market_panel.setVisible(on and self.gl.market)
+
+    # ---- the one real handoff: hand a file to a device over the wifi ---------
+    def _toggle_deliver(self, dev):
+        if self.deliver_panel.isVisible():
+            self._close_deliver()
+            return
+        if dev is None:
+            return
+        self._open_deliver(dev)
+
+    def _open_deliver(self, dev):
+        self._deliver_dev = dev
+        label = dev.get("label") or "a device"
+        ip = dev.get("ip") or dev.get("mac") or "?"
+        self.deliver_target.setText(f"to: {label}  \u00b7  {ip}  (same wifi)")
+        self.deliver_url.setText("pick a file, then hand it")
+        self.deliver_file.setText("no file picked")
+        self._deliver_path = None
+        self._dp_go.setEnabled(False)
+        self._show_qr(b"")
+        self._deliver_refresh()
+        self.deliver_panel.setVisible(True)
+        self.gl.deliver_open = True
+        try:
+            self.gl.keys.clear()
+            self.gl.set_look_lock(False)
+        except Exception:
+            pass
+        self._reflow_overlays()
+        self.deliver_panel.setFocus()
+
+    def _close_deliver(self):
+        if not self.deliver_panel.isVisible():
+            return
+        self.deliver_panel.setVisible(False)
+        self.gl.deliver_open = False
+        self._reflow_overlays()
+        self.gl.setFocus()
+        try:
+            self.gl.set_look_lock(True)
+        except Exception:
+            pass
+
+    def _deliver_pick(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "pick an image to hand over the wifi",
+            str(Path.home()),
+            "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All files (*)")
+        if not path:
+            return
+        self._deliver_path = path
+        p = Path(path)
+        self.deliver_file.setText(f"{p.name}  ({p.stat().st_size} bytes)")
+        self._dp_go.setEnabled(True)
+        self.deliver_url.setText("press \u2018hand it over\u2019 to serve it")
+
+    def _deliver_start(self):
+        if not self._deliver_path:
+            return
+        try:
+            st = self.gl.deliver.serve(self._deliver_path)
+        except Exception as e:
+            self.deliver_url.setText(f"could not serve: {e}")
+            return
+        self.deliver_url.setText(st["url"])
+        if st["qr"]:
+            self._show_qr(st["qr"])
+        self.deliver_file.setText(f"{st['name']} \u2014 serving on {st['ip']}:{st['port']}")
+        self._flash_send("handing over \u2014 a phone on the same wifi can open it")
+
+    # ---- the wifi apron: the radio's last scan, and a gated real connect ----
+    def _on_wifi_chosen(self, net):
+        """A network mote was chosen on the floor (E). Show the apron on it."""
+        self._wifi_open = net
+        self.wifi_panel.setVisible(True)
+        self._wifi_panel_refresh()
+        self._reflow_overlays()
+
+    def _wifi_only_uplink(self):
+        """The one interface holding the default route, or None when there are
+        zero or several (then a wifi swap cannot strand us). Reads /proc, no tool."""
+        ifaces = []
+        try:
+            with open("/proc/net/route") as fh:
+                for ln in fh.read().splitlines()[1:]:
+                    f = ln.split()
+                    if len(f) >= 8 and f[1] == "00000000" \
+                            and (int(f[3], 16) & 0x2) and f[0] not in ifaces:
+                        ifaces.append(f[0])
+        except Exception:
+            return None
+        return ifaces[0] if len(ifaces) == 1 else None
+
+    def _wifi_uplink_guard(self, ssid):
+        """The house's own scar: joining a network over the wifi that is our ONLY
+        way out can drop us off the net. Warn before it happens; never block."""
+        on = (self.gl._wifi or {}).get("on") or {}
+        if not on or on.get("ssid") == ssid:
+            return ""
+        only = self._wifi_only_uplink()
+        if only and only == on.get("iface"):
+            return (f"joining {ssid} would replace {on['ssid']} on {only}, the "
+                    f"machine's ONLY way out \u2014 if {ssid} does not come up, "
+                    f"the wire goes dark")
+        return ""
+
+    def _wifi_do_connect(self, ssid, pw):
+        if self._wifi_busy:
+            return
+        self._wifi_busy = True
+        self._wifi_join_result = None
+        self.wifi_go.setEnabled(False)
+
+        def work():
+            ok, msg = wifivision.connect(ssid, pw or None)
+            self._wifi_join_result = (ok, msg, ssid)
+
+        self.wifi_note.setText(f"joining {ssid} \u2026 (a few seconds, off the "
+                               "paint thread)")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _wifi_poll(self):
+        if not self._wifi_busy or self._wifi_join_result is None:
+            return
+        ok, msg, ssid = self._wifi_join_result
+        self._wifi_join_result = None
+        self._wifi_busy = False
+        self.gl._wifi = None                 # re-read the radio's sight
+        self._flash_send(("connected to " if ok else "could not join ") + ssid
+                         + (" \u2014 " + msg if msg else ""))
+        if self.wifi_panel.isVisible():
+            self._wifi_panel_refresh()
+
+    def _wifi_panel_refresh(self):
+        w = self.gl._wifi_networks()
+        on = w.get("on") or {}
+        self.wifi_on.setText(
+            f"on: \u25c8 {on['ssid']}  ({on.get('iface', '')} {on.get('ip', '')})"
+            if on else "on: not connected to wifi")
+        if not w.get("ok"):
+            self.wifi_detail.setText(w.get("reason") or "no wifi read available")
+            self.wifi_list.clear()
+            self.wifi_go.setEnabled(False)
+            return
+        nets = w.get("networks") or []
+        self.wifi_list.blockSignals(True)
+        self.wifi_list.clear()
+        for n in nets:
+            tag = ("\u25c8 on" if n["in_use"] else
+                   "open" if n["open"] else "secured")
+            sv = " \u00b7 saved" if n.get("saved") else ""
+            self.wifi_list.addItem(f"{n['signal']:>3}%  {tag}{sv}   {n['ssid']}")
+        self.wifi_list.blockSignals(False)
+        want = (self._wifi_open or {}).get("ssid")
+        row = next((i for i, n in enumerate(nets) if n["ssid"] == want), 0)
+        if nets:
+            self.wifi_list.setCurrentRow(row)
+        self._wifi_selected()
+
+    def _wifi_selected(self, _row=None):
+        w = self.gl._wifi or {}
+        nets = w.get("networks") or []
+        i = self.wifi_list.currentRow()
+        net = nets[i] if 0 <= i < len(nets) else None
+        self._wifi_open = net
+        self._wifi_confirm = False
+        if net is None:
+            self.wifi_detail.setText("no network selected")
+            self.wifi_pass.setVisible(False)
+            self.wifi_go.setEnabled(False)
+            return
+        on = w.get("on") or {}
+        same = on.get("ssid") == net["ssid"]
+        self.wifi_detail.setText(
+            f"{net['ssid']}  \u00b7  {net['signal']}%  \u00b7  "
+            f"{'open (no password)' if net['open'] else net['security']}  \u00b7  "
+            f"ch {net['channel']}  \u00b7  {net['rate']}  \u00b7  "
+            + ("your saved profile" if net.get("saved") else "no saved profile"))
+        needpw = (not net["open"]) and (not net.get("saved"))
+        self.wifi_pass.setVisible(needpw)
+        self.wifi_pass.setEnabled(needpw)
+        self.wifi_pass.clear()
+        self.wifi_go.setText("already connected" if same else "connect")
+        self.wifi_go.setEnabled(not same and not self._wifi_busy)
+        self.wifi_note.setText(
+            "a real join via NetworkManager \u2014 it can change your uplink. "
+            "It never attacks anything.")
+
+    def _wifi_connect_action(self):
+        net = self._wifi_open
+        if net is None or self._wifi_busy:
+            return
+        ssid = net["ssid"]
+        on = (self.gl._wifi or {}).get("on") or {}
+        if on.get("ssid") == ssid:
+            self._flash_send("already on " + ssid)
+            return
+        guard = self._wifi_uplink_guard(ssid)
+        if guard and not self._wifi_confirm:
+            self._wifi_confirm = True
+            self.wifi_note.setText("\u26a0 " + guard
+                                   + "  \u2014 press connect again to proceed anyway.")
+            return
+        self._wifi_confirm = False
+        pw = self.wifi_pass.text().strip()
+        if (not net["open"]) and (not net.get("saved")) and not pw:
+            self.wifi_note.setText("this network is secured \u2014 type the "
+                                   "password first.")
+            return
+        self._wifi_do_connect(ssid, pw)
+
+    def _toggle_wifi_panel(self):
+        if self.wifi_panel.isVisible():
+            self._close_wifi_panel()
+        else:
+            self.wifi_panel.setVisible(True)
+            self._wifi_panel_refresh()
+            self._reflow_overlays()
+
+    def _close_wifi_panel(self):
+        self.wifi_panel.setVisible(False)
+        self._reflow_overlays()
+        try:
+            self.gl.setFocus()
+        except Exception:
+            pass
+
+    def _wifi_refresh_action(self):
+        self.gl._wifi = None
+        self._wifi_panel_refresh()
+
+    # ---- the pearl ring: the sites kept behind gates in the Exchange ---------
+    def _toggle_pearl_panel(self, _flag=None):
+        if self.pearl_panel.isVisible():
+            self._close_pearl_panel()
+        else:
+            self.pearl_panel.setVisible(True)
+            self._pearl_panel_refresh()
+            self._reflow_overlays()
+
+    def _close_pearl_panel(self):
+        self.pearl_panel.setVisible(False)
+        self._reflow_overlays()
+        try:
+            self.gl.setFocus()
+        except Exception:
+            pass
+
+    def _pearl_panel_refresh(self):
+        self.pearl_list.clear()
+        pearls = wirepearls.all_pearls()
+        for p in pearls:
+            tag = "stock \u2014 held fast" if p.get("stock") else "yours"
+            it = QListWidgetItem(f"{p['name']}  \u00b7  {p.get('host') or p['url']}"
+                                 f"  \u00b7  {tag}")
+            it.setData(Qt.ItemDataRole.UserRole, p["id"])
+            self.pearl_list.addItem(it)
+        if not pearls:
+            self.pearl_list.addItem("\u2014 the ring is empty \u2014")
+        if self.pearl_list.count():
+            self.pearl_list.setCurrentRow(0)
+        else:
+            self.pearl_del.setEnabled(False)
+
+    def _pearl_selected(self, _row=None):
+        it = self.pearl_list.currentItem()
+        pid = it.data(Qt.ItemDataRole.UserRole) if it is not None else None
+        self.pearl_del.setEnabled(bool(pid) and not wirepearls.is_stock(pid))
+
+    def _pearl_add_action(self):
+        name = self.pearl_name.text().strip()
+        url = self.pearl_url.text().strip()
+        try:
+            p = wirepearls.add(name, url)
+        except ValueError as e:
+            self.pearl_note.setText(f"\u26a0 {e}")
+            return
+        self.pearl_name.clear()
+        self.pearl_url.clear()
+        self.pearl_note.setText(f"cast \u25cb {p['name']} \u2014 flying to it in the "
+                                "Exchange reads the page for real.")
+        self.gl.refresh_pearls()
+        self._pearl_panel_refresh()
+
+    def _pearl_del_action(self):
+        it = self.pearl_list.currentItem()
+        if it is None:
+            return
+        pid = it.data(Qt.ItemDataRole.UserRole)
+        if pid is None:
+            return
+        if wirepearls.is_stock(pid):
+            self.pearl_note.setText("\u26a0 that is a stock pearl \u2014 it is held "
+                                    "fast and can never be deleted.")
+            return
+        if wirepearls.remove(pid):
+            self.pearl_note.setText("uncast \u2014 the gate is gone from the ring.")
+        self.gl.refresh_pearls()
+        self._pearl_panel_refresh()
+
+    def _deliver_stop(self):
+        self.gl.deliver.stop()
+        self.deliver_url.setText("stopped \u2014 pick a file to hand it again")
+        self._show_qr(b"")
+        self._deliver_refresh()
+
+    def _deliver_refresh(self):
+        st = self.gl.deliver.status()
+        if st["url"]:
+            self.deliver_url.setText(st["url"])
+            if st["qr"]:
+                self._show_qr(st["qr"])
+        else:
+            self.deliver_url.setText("pick a file, then hand it")
+
+    def _show_qr(self, png: bytes):
+        pix = QPixmap()
+        if png and pix.loadFromData(png):
+            self.deliver_qr.setPixmap(pix.scaled(
+                176, 176, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+            self.deliver_qr.setToolTip("scan with the phone to pull the file down")
+        else:
+            self.deliver_qr.clear()
+            self.deliver_qr.setText("")
+            self.deliver_qr.setToolTip("")
+
+    def _flash_send(self, msg):
+        try:
+            self.gl._flash(msg)
+        except Exception:
+            pass
 
     def _clear_form(self):
         lay = self._mform

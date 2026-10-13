@@ -89,7 +89,10 @@ can step past the last electron — and the descent never bottoms out. The open 
 below the edge is unbounded, alive and endless, but it holds **no named entity and
 carries no data**: every device, domain, port, IP and MAC still lives above the
 edge, and everything below is atmosphere drawn from nothing. `[E]` rises back to
-the edge, `[Home]` to the surface.
+the edge, `[Home]` to the surface. You keep falling but may now steer with WASD
+(Space/C to slow or hasten the drop), and one **faint glow** hangs far down in the
+sea — the house words *CREATE · BUILD · LEARN · LOVE*, drawn from nothing, a place
+to steer toward. It is atmosphere too: not an entity, not a datum, no promise.
 
 The one exception to that wall is **the outward gate** — a pier that runs off
 the floor's far edge (due −z), out over the open sea, to a gate that **really
@@ -98,20 +101,34 @@ near it the world makes real DNS lookups and real HTTP/HTTPS requests (via
 `wirenet.py` — the standard library only, never a browser) and shows exactly what
 came back: status, milliseconds, the resolved IP, the bytes. `E` steps through the
 gate into **the Exchange** — a hall, past the edge, whose ring holds gates that
-each lead to a real service out on the net. There is one gate there for now, and
-it is **DuckDuckGo**: stand at its console, type a search, and the gate really
-asks DuckDuckGo's lite endpoint. You do not get a browser — you get **the packet
-theatre**: every real phase of the request (DNS, TCP, TLS, the request, the
-response) crosses the hall as a stream of packet motes with its real milliseconds
-and bytes logged in an in-world ledger; each result hangs as a **tablet** on the
-ring, and you **fly to one and press `E`** to reach it, where the page's real text
-assembles on a slab of light. More gates will hang on the ring later. If
+each lead to a real service out on the net. The ring carries the **DuckDuckGo
+search gate** (stand at its console, type a search, and the gate really asks
+DuckDuckGo's lite endpoint) and the **pearl ring** — kept sites (`wirepearls.py`)
+you can cast and uncast from the Vision tab's pearl panel. A **stock pearl**,
+**IslamQA** (`islamqa.info`), is held fast and can never be deleted. Step into a
+pearl and its page is fetched for real (standard library, no browser, no
+JavaScript, no images) and served as text; at its console, typing a question
+searches *within* the site (a real search restricted to its own domain — IslamQA's
+own search is client-side, so `site:islamqa.info` is used; a pearl may instead
+carry a server-rendered `search` URL template with `{q}`). You do not get a
+browser — you get **the packet theatre**: every real phase of the request (DNS,
+TCP, TLS, the request, the response) crosses the hall as a stream of packet motes
+with its real milliseconds and bytes logged in an in-world ledger; each result
+hangs as a **tablet** on the ring, and you **fly to one and press `E`** to reach
+it, where the page's real text assembles on a slab of light. One gate on the ring
+is **Learn Islam** — it steps you into the room of the Word (below); and in that
+room an **amber gate** steps you back out to the IslamQA pearl, so the Qur'an and
+the scholars' answers are one gate apart. If
 `MRFLUFFY_GATE_URL` names a
+relay, stepping through the outer gate first joins it (so the market crowd becomes
 relay, stepping through the outer gate first joins it (so the market crowd becomes
 real other users). The neutral reachability target is `MRFLUFFY_NET_HOST`; private
 / loopback addresses are refused unless `MRFLUFFY_NET_ALLOW_PRIVATE=1`. Every
 request runs on ONE background thread with a timeout and a byte ceiling, so a slow
-machine never stutters.
+machine never stutters. Both the outward target and the mesh **relay seeds** are
+the player's own choice, set in the game menu (**Tab → ⚙ Settings → the outward
+connection**) and saved to `config/wire_settings.json` — never hardcoded; the
+`MRFLUFFY_NET_HOST` / `MRFLUFFY_GATE_URL` env vars still override them.
 
 The floor is drawn as **rooms**: the segment you are on right now is the lit room
 inside a low wall, and every other segment in the files sits outside that wall as
@@ -160,6 +177,22 @@ gated writes), the rest lives in `wiregame.py`.
   named fields (trend, strength direction, MA-cross bias, range signal, advisor band,
   buy/sell score); `wiregate._signal_lean()` computes it, the world only points it.
   It is **not a promise and not an order** — the panel names the fields that carried it.
+- **The six scenarios are a panel you toggle, not sky text.** Beside the
+  **☰ menu** button floats a **scenarios** button; press it and the bot's own 1–6
+  rubric opens as a floating panel over the world (**✕** or Esc hides it, and the
+  button shows/hides it at will). The panel carries the rubric **verbatim** — each
+  `Scenario N — …` line with its reason, from blackhorse's earlier brain-verdict
+  panel (`_SCEN_LINES`, commit `6eded857`) — with an **active now** line naming the
+  interval sitting in each (`5m→2 · 15m→2 · 60m→2 · 240m→2 · 1440m→…`), and the
+  scenario each interval currently matches marked `◀ active`. The five live lanes'
+  labels are re-fetched from the bot's own channel fields (`wiregate._scenario_label`,
+  a faithful port of blackhorse's `_setup_scenario`); **1440m is not a live channel**,
+  so it is derived from the bot's own saved rows (`logs/sb_rows_1440m_dump.json`) and
+  labelled as such — the saved rows carry no RSI/score, so that is stated plainly
+  rather than guessed. The panel refreshes itself off the bot's files every few
+  seconds (`wiregate.scenarios()`), labels only — it never gates and never trades.
+  (The per-platform floating read no longer carries the scenario line; it lives in
+  the panel for every interval at once.)
 - The agent settings **panel floats over the world** (a sibling of the GL view,
   translucent, rounded, with an **✕** in its corner — H also toggles it), so
   editing an agent never pops a separate window or breaks the view: the market
@@ -246,7 +279,7 @@ local copy) + `quran.py` (opens it) + `quranworld.py` (the motif engine) +
 `wiregame.py`.
 
 - **Two rooms in one.** From the wire floor you enter a **cluster of chapters
-  hung like stars**: all **114 surahs** sit as stars **scattered wide through a
+  arrayed like stars**: all **114 surahs** sit as stars **scattered wide through a
   tall volume of sky** (a fixed best-candidate arrangement, so it is always the
   same sky, but the stars stand far apart and you fly a while between them —
   radius `WORD_CLUSTER_R` = 26, heights `WORD_FLOOR_Y+5` up to `WORD_CLUSTER_TOP`),
@@ -257,7 +290,10 @@ local copy) + `quran.py` (opens it) + `quranworld.py` (the motif engine) +
   skip the flying, the codex panel lists **every chapter** — pick one and open
   its first ayah; and a quick bar floats over the world (`◀ prev ayah`, `next
   ayah ▶`, `chapters`, `random`, `leave`) for travelling without hunting for a
-  gate. `Home` (or the far gate) leaves the whole room.
+  gate. `Home` (or the far gate) leaves the whole room. An **amber gate** on the
+  floor of the chapters hall is the way **out to IslamQA** (the stock pearl in the
+  Exchange) — the same link, read the other way: the Qur'an and the scholars'
+  answers are one gate apart.
 - **Each ayah is its own world.** Stepping into an ayah opens a room generated by
   **`quranworld.recipe(surah, ayah)`** — deterministic from a `surah:ayah` seed,
   so the same verse always yields the same world. The recipe keys abstract,

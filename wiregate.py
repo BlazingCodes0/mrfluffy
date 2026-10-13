@@ -70,9 +70,47 @@ DECIDER_JSON = BH / "config" / "decider.json"
 # logs/signals/<PAIR>.json is each pair's own lane set).
 SIGNAL_LATEST_JSON = BH / "logs" / "signal_latest.json"
 SIGNALS_DIR = BH / "logs" / "signals"
+# the bot's own saved per-candle rows — for the 1440m lane, which the live
+# snapshot does not carry as a channel. Replayed, never re-run.
+SB_ROWS_1440_JSON = BH / "logs" / "sb_rows_1440m_dump.json"
 
 # the canonical SignalBot lanes, channel name -> the interval it carries
 _CH_INTERVAL = {"ripple": "15m", "wave": "60m", "tide": "240m"}
+
+# ---- the six scenarios: the bot's own rubric, replayed -----------------------
+# Verbatim from blackhorse (app/main.py _SCEN_LINES; the "why not buy" lines are
+# its _SCEN_WHY), added in commit 6eded857 alongside brain verdict, removed when
+# blackhorse dropped the brain (154ec9c). The detector below is a faithful port
+# of blackhorse's trade/signalbot.py::_setup_scenario — the SAME rubric, read
+# live from the bot's own written channel fields; nothing is invented, and this
+# only labels, it never gates or trades.
+SCENARIO_RUBRIC = [
+    {"n": "1", "title": "RSI washout, price holds above low",
+     "text": "Scenario 1 \u2014 RSI washout, price holds above low\n- BuyScore often rises as RSI drops (range floor buys). If RSI \u2264 35 and score \u2265 0.60 and spread mode is not_against \u2192 15m BUY fires. This is the profile's bread-and-butter setup. Buy.",
+     "why": "RSI oversold but score gate still failing \u2014 wait for buyScore \u2265 0.60 to hold, that's the knife having stopped falling.",
+     "reason": "BuyScore often rises as RSI drops (range floor buys). If RSI \u2264 35 and score \u2265 0.60 and spread mode is not_against \u2192 15m BUY fires. This is the profile's bread-and-butter setup. Buy."},
+    {"n": "2", "title": "RSI \u2264 35 but spread still weakening",
+     "why": "RSI is oversold but the spread is still weakening \u2014 classic knife, the gate is right to refuse. Wait for the spread to stop falling.",
+     "text": "Scenario 2 \u2014 RSI \u2264 35 but spread still weakening\n- RSI gate passes, but spreadMode for 15m fails. Why not buy: catching a knife while the spread is still deteriorating is where floor buys historically lost. Wait.",
+     "reason": "RSI gate passes, but spreadMode for 15m fails. Why not buy: catching a knife while the spread is still deteriorating is where floor buys historically lost. Wait."},
+    {"n": "3", "title": "SpreadMA flips bullish, trend turns up, price above low",
+     "why": "this is the green-light scenario \u2014 spreadMA bullish + trend up. If it drifted off, patient again.",
+     "text": "Scenario 3 \u2014 SpreadMA flips bullish, trend turns up, price above low\n- Everything green: spreadMode ok, RSI likely rising from oversold, 240m tide confirming. Buy \u2014 often a few bars after the exact low, which is the tax we accept.",
+     "reason": "Everything green: spreadMode ok, RSI likely rising from oversold, 240m tide confirming. Buy \u2014 often a few bars after the exact low, which is the tax we accept."},
+    {"n": "4", "title": "Price slices through low/floor",
+     "why": "the floor broke and the range invalidated \u2014 a floor that won't hold isn't a floor. No buy, no edge.",
+     "text": "Scenario 4 \u2014 Price slices through low/floor\n- trendState degrades, range invalidation triggers, spreadMA not bullish. No buy \u2014 a floor that won't hold isn't a floor.",
+     "reason": "trendState degrades, range invalidation triggers, spreadMA not bullish. No buy \u2014 a floor that won't hold isn't a floor."},
+    {"n": "5", "title": "15m strength == 0 while 240m strength rising",
+     "why": "15m strength is asleep at ~0. Zero isn't a buy signal \u2014 it's the tape holding its breath. Wait for 15m rising off 0 + RSI\u226435 before any fill.",
+     "text": "Scenario 5 \u2014 15m strength == 0 while 240m strength rising\n- 15m strength=0 means the 15m isn't leading \u2014 defer to tide/240m for direction, use 15m only for entry timing: wait for 15m strength rising off 0 + RSI turning up from \u226435. Don't market-buy the zero.",
+     "reason": "15m strength=0 means the 15m isn't leading \u2014 defer to tide/240m for direction, use 15m only for entry timing: wait for 15m strength rising off 0 + RSI turning up from \u226435. Don't market-buy the zero."},
+    {"n": "6", "title": "60m/240m scores nearly threshold-broken, 15m weak",
+     "why": "wait for the 15m up-tick \u2014 the 60m/240m scores are nearly there, but the trigger lane stays 15m.",
+     "text": "Scenario 6 \u2014 60m/240m scores nearly threshold-broken, 15m weak\n- If we let 15m be the final gate we can stay flat while 240m rides a floor\u2192mid-range mean reversion. Practically: watch 15m strength rising from 0 as the trigger even if the 15m range signal is neutral.",
+     "reason": "If we let 15m be the final gate we can stay flat while 240m rides a floor\u2192mid-range mean reversion. Practically: watch 15m strength rising from 0 as the trigger even if the 15m range signal is neutral."},
+]
+SCENARIO_WHY = {s["n"]: s["why"] for s in SCENARIO_RUBRIC}
 
 MARKET_FLOOR_Y = -80.0        # the market is a place below the wire's strata ring
 MARKET_R = 54.0
@@ -436,7 +474,6 @@ def _signal_lines(c: dict, name: str) -> list:
         lines.append(f"    MA10−MA30 diff={sm.get('diff'):+.4f} "
                      f"({sm.get('diffPct'):+.3f}%) · {sm.get('signal')}")
     if is15:
-        lines.append(f"    scenario: {c.get('setupScenario')}")
         bw = c.get("bottomWatch") or {}
         if bw.get("armed"):
             lines.append(f"    bottom-watch: ARMED · price {_num(bw.get('price'))} "
@@ -530,6 +567,100 @@ def _agent_signal(a: dict, sig: dict) -> dict:
         "primary_interval": primary["interval"],
         "lean": lean, "summary": summary, "reads": reads,
     }
+
+
+def _scenario_label(c: dict) -> str:
+    """Which of the six the bot's own fields currently sit in. A faithful port of
+    blackhorse's trade/signalbot.py::_setup_scenario (label only, no gate power).
+    Falls back to the bot's written `setupScenario` when the raw fields are gone."""
+    try:
+        r = c.get("RSI") or {}
+        mr = c.get("marketResult") or {}
+        sm = c.get("spreadMA") or {}
+        price = c.get("currPrice"); low = c.get("low")
+        buy_score = c.get("buyScore") or 0
+        rsi = r.get("currentRSI"); rsi = 99 if rsi is None else rsi
+        against = str(mr.get("spreadDirection") or "").lower() in ("weakening", "down")
+        if price is not None and low is not None and price < low:
+            return "4"
+        if sm.get("signal") == "bullish" and mr.get("trendState") in ("up", "bull", "rising") \
+                and price and low and price >= low:
+            return "3"
+        if rsi <= 35 and not against and buy_score >= 0.60:
+            return "1"
+        if rsi <= 35 and against:
+            return "2"
+        strg = c.get("strength") or 0
+        if strg < 0.10 and buy_score >= 0.85:
+            return "5/6"
+        if (c.get("rangeSignal") or "") == "BUY" and strg < 0.15:
+            return "5"
+        return "none"
+    except Exception:
+        pass
+    sc = str(c.get("setupScenario") or "none")
+    return sc.split(":", 1)[0].strip() or "none"
+
+
+def _scenario_rows(sig: dict) -> list:
+    """One scenario read per interval — the bot's own labels, fetched live.
+
+    The live snapshot carries 5m/15m/60m/240m; each channel already has the bot's
+    read, so the label is recomputed from its fields (the same rubric). 1440m is
+    not a live channel, so it is derived from the bot's own saved 1440m rows."""
+    latest = sig.get("latest") or {}
+    channels = latest.get("channels") or {}
+    order = ["ripple", "wave", "tide", "ripple5", "wave15", "tide60"]
+    names = [n for n in order if n in channels] + [n for n in channels if n not in order]
+    rows, seen = [], set()
+    for n in names:
+        c = channels[n] or {}
+        iv = str(c.get("interval") or n)
+        if iv in seen:
+            continue
+        seen.add(iv)
+        rows.append({"interval": iv, "channel": n,
+                     "scenario": _scenario_label(c), "source": "bot snapshot"})
+    row1440 = _scenario_1440()
+    if row1440:
+        rows.append(row1440)
+    rows.sort(key=lambda r: (_iv_min(r["interval"]) if _iv_min(r["interval"]) is not None
+                             else 9e9, r["interval"]))
+    return rows
+
+
+def _scenario_1440() -> dict:
+    """The 1440m lane's scenario, from the bot's own saved rows. The saved rows
+    carry strength/rangeSignal/trend/maSpread but no RSI or buyScore, so only the
+    gates those fields can settle are applied — the rest is reported honestly."""
+    rows = _load_json(SB_ROWS_1440_JSON, None)
+    if not isinstance(rows, list) or not rows:
+        return None
+    last = rows[-1] or {}
+    price = last.get("price"); low = last.get("low")
+    strength = last.get("strength") or 0
+    trend = str(last.get("trend") or "").lower()
+    ma = last.get("maSpreadPct")
+    bullish_ma = isinstance(ma, (int, float)) and ma >= 3.0
+    note = "saved rows carry no RSI/score \u2014 those gates are not applied"
+    num = "none"
+    if price is not None and low is not None and price < low:
+        num = "4"
+    elif bullish_ma and trend in ("up", "bull", "rising") and price and low and price >= low:
+        num = "3"
+    elif (last.get("rangeSignal") or "") == "BUY" and strength < 0.15:
+        num = "5"
+    elif strength < 0.10 and bullish_ma:
+        num = "5/6"
+    return {"interval": "1440m", "channel": "tide (saved rows)",
+            "scenario": num, "source": "bot's saved rows", "note": note}
+
+
+def scenarios() -> dict:
+    """The full rubric plus which interval sits in which scenario, right now.
+    Cheap: reads only the bot's signal snapshots + its saved 1440m rows."""
+    sig = _load_signals()
+    return {"rubric": SCENARIO_RUBRIC, "rows": _scenario_rows(sig)}
 
 
 def snapshot() -> dict:
@@ -644,6 +775,7 @@ def snapshot() -> dict:
         "pairs": PAIRS,
         "sources": _sources(),
         "honesty": _honesty(),
+        "scenarios": scenarios(),
     }
 
 
@@ -884,6 +1016,21 @@ class Presence:
         self._thread = None
         self.started = False
         self._online = None
+        # mesh seeds: every door we announce to. A shell needs ONE reachable
+        # door to be on the wire; the doors we know pass the word of shells they
+        # alone can hear, so the wire heals around whatever is not reachable.
+        self.doors = [self._base]
+        self.advertise_url = self._public_url()   # the door OTHERS dial to reach US
+        self._bc_stop = None
+        self._bc_thread = None
+
+    def _public_url(self) -> str:
+        given = os.environ.get("MRFLUFFY_WIRE_URL")
+        if given:
+            return given.rstrip("/")
+        ip = _lan_ipv4() or "127.0.0.1"
+        scheme = "https" if (self.tls and self._server_ctx is not None) else "http"
+        return f"{scheme}://{ip}:{self.addr[1]}"
 
     def _urlopen(self, target, timeout=1.0):
         """urlopen on our pinned TLS context when the relay is https."""
@@ -909,6 +1056,9 @@ class Presence:
             self.started = False
 
     def stop(self) -> None:
+        if self._bc_stop is not None:
+            self._bc_stop.set()
+            self._bc_stop = None
         if self._server is not None:
             try:
                 self._server.shutdown()
@@ -927,7 +1077,8 @@ class Presence:
         with self._lock:
             self._expire()
             self._peers[name] = {"x": pose.get("x", 0.0), "y": pose.get("y", 0.0),
-                                 "z": pose.get("z", 0.0), "t": time.time()}
+                                 "z": pose.get("z", 0.0), "t": time.time(),
+                                 "card": pose.get("card"), "door": pose.get("door")}
 
     def _drop(self, name: str) -> None:
         with self._lock:
@@ -937,7 +1088,8 @@ class Presence:
         with self._lock:
             self._expire()
             now = time.time()
-            return [{"name": k, "x": v["x"], "y": v["y"], "z": v["z"]}
+            return [{"name": k, "x": v["x"], "y": v["y"], "z": v["z"], "t": v["t"],
+                     "card": v.get("card"), "door": v.get("door")}
                     for k, v in self._peers.items() if k != self.user]
 
     def online(self) -> bool:
@@ -965,27 +1117,32 @@ class Presence:
         return doc if not self.key else None
 
     def announce(self, pose: dict) -> bool:
-        """POST our sealed pose to the relay; False when the relay refuses us."""
-        try:
-            self._online = False
-            req = urllib.request.Request(
-                self._base + "/pose", method="POST",
-                data=self._seal({"name": self.user, "tok": self.tok,
-                                 "pose": pose}),
-                headers={"Content-Type": "application/json"})
-            with self._urlopen(req, timeout=1.0) as r:
-                got = json.loads(r.read() or b"{}")
-                self.ward = int(got.get("ward", 0) or 0)
-            self._online = True
-            return True
-        except Exception:
-            self._online = False
-            return False
+        """POST our sealed pose to every door we hold; True when any answers.
+        The door we hand out is our own reachable URL, so the mesh can dial us
+        too — word travels even when two shells can never reach each other."""
+        payload = {"name": self.user, "tok": self.tok,
+                   "pose": dict(pose or {}, door=self.advertise_url)}
+        self._online = False
+        ok = False
+        for base in list(self.doors):
+            try:
+                req = urllib.request.Request(
+                    base + "/pose", method="POST", data=self._seal(payload),
+                    headers={"Content-Type": "application/json"})
+                with self._urlopen(req, timeout=1.0) as r:
+                    got = json.loads(r.read() or b"{}")
+                    self.ward = int(got.get("ward", 0) or 0)
+                ok = True
+            except Exception:
+                continue
+        self._online = ok
+        return ok
 
     def leave(self) -> None:
+        base = self._base
         try:
             req = urllib.request.Request(
-                self._base + "/leave", method="POST",
+                base + "/leave", method="POST",
                 data=self._seal({"name": self.user, "tok": self.tok}),
                 headers={"Content-Type": "application/json"})
             with self._urlopen(req, timeout=1.0):
@@ -993,18 +1150,113 @@ class Presence:
         except Exception:
             pass
 
+    def gossip(self) -> int:
+        """The mesh: ask each door what OTHER doors it knows and join them, so
+        the wire heals around any door that blinks out of existence."""
+        learned = 0
+        for base in list(self.doors):
+            try:
+                with self._urlopen(base + "/mesh", timeout=1.0) as r:
+                    doc = json.loads(r.read() or b"{}")
+                data = self._unwrap(doc)
+                if data is None:
+                    continue
+                for d in data.get("doors", []):
+                    if d and d not in self.doors and d != self.advertise_url \
+                            and len(self.doors) < 24:
+                        self.doors.append(d)
+                        learned += 1
+            except Exception:
+                continue
+        return learned
+
     def peers(self) -> list:
-        """Other users' characters in the market, pulled from the relay."""
+        """Every other shell's word, merged across all the doors we hold.
+        Fresh shells with a reachable door get dialed straight; the rest are
+        carried by whichever seed can still hear them."""
+        merged: dict = {}
+        for base in list(self.doors):
+            try:
+                with self._urlopen(base + "/peers", timeout=1.0) as r:
+                    doc = json.loads(r.read() or b"{}")
+                data = self._unwrap(doc)
+                if data is None:
+                    continue
+                for p in data.get("peers", []):
+                    n = p.get("name")
+                    if not n or n == self.user:
+                        continue
+                    if n not in merged or p.get("t", 0) > merged[n].get("t", 0):
+                        merged[n] = p
+                        d = p.get("door")
+                        if (d and d not in self.doors and d != self.advertise_url
+                                and len(self.doors) < 16
+                                and time.time() - p.get("t", 0) < 4.0):
+                            self.doors.append(d)   # take the direct hand
+            except Exception:
+                continue
+        return list(merged.values()) if merged else []
+
+    def start_beacon(self) -> None:
+        """Zero-config door: every shell shouts its door on the wire and listens
+        for the others. Works on wifi, a hotspot's own uplink or a satellite
+        link wherever broadcasts ride. Off with MRFLUFFY_WIRE_BEACON=0 when a
+        shell would rather be silent."""
+        if self._bc_thread is not None or os.environ.get("MRFLUFFY_WIRE_BEACON") == "0":
+            return
         try:
-            with self._urlopen(self._base + "/peers", timeout=1.0) as r:
-                doc = json.loads(r.read() or b"{}")
-            data = self._unwrap(doc)
-            if data is None:
-                return []
-            return [p for p in data.get("peers", [])
-                    if p.get("name") and p.get("name") != self.user]
+            stop = threading.Event()
+
+            def rx():
+                s = None
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    s.bind(("", BEACON_PORT))
+                    s.settimeout(1.5)
+                    while not stop.is_set():
+                        try:
+                            data, _adr = s.recvfrom(2048)
+                        except socket.timeout:
+                            continue
+                        try:
+                            m = json.loads(data)
+                        except Exception:
+                            continue
+                        if m.get("m") != "wire" or m.get("name") == self.user:
+                            continue
+                        d = str(m.get("door") or "")
+                        if (d.startswith(("http://", "https://"))
+                                and d not in self.doors and d != self.advertise_url):
+                            self.doors.append(d)
+                except Exception:
+                    pass
+                finally:
+                    if s is not None:
+                        try:
+                            s.close()
+                        except Exception:
+                            pass
+
+            def tx():
+                while not stop.is_set():
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                        s.sendto(json.dumps({"m": "wire", "name": self.user,
+                                             "door": self.advertise_url}).encode(),
+                                 BEACON_ADDR)
+                        s.close()
+                    except Exception:
+                        pass
+                    stop.wait(5.0)
+
+            self._bc_stop = stop
+            self._bc_thread = threading.Thread(target=rx, daemon=True)
+            self._bc_thread.start()
+            threading.Thread(target=tx, daemon=True).start()
         except Exception:
-            return []
+            self._bc_stop = None
 
     def describe(self) -> str:
         if self.tls and self._server_ctx is not None:
@@ -1039,6 +1291,23 @@ RATE_MAX = 200            # requests per window per IP
 BURST_MAX = 40            # poses per window per name
 MAX_POSE_BYTES = 4096     # reject oversized shells
 MAX_PEERS = 64            # the floor holds a bounded crowd
+
+# the wire's zero-config door: every shell shouts its address here and listens
+BEACON_PORT = 17835
+BEACON_ADDR = ("255.255.255.255", BEACON_PORT)
+
+
+def _lan_ipv4():
+    """The address shells on the same wire dial to reach this door. connect()
+    chooses the route and makes no packet."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return None
 
 class _Handler(BaseHTTPRequestHandler):
     def setup(self):
@@ -1112,6 +1381,12 @@ class _Handler(BaseHTTPRequestHandler):
                                     "ward": pr.ward})
         if self.path == "/peers":
             data = {"peers": pr._snapshot(), "ghost": pr.ghost}
+            body = _ghost_envelope(pr.key, data) if pr.key else data
+            return self._json(200, body)
+        if self.path == "/mesh":
+            # what this door holds, and which other doors it knows — mesh seeds
+            data = {"peers": pr._snapshot(), "doors": list(pr.doors),
+                    "ghost": pr.ghost}
             body = _ghost_envelope(pr.key, data) if pr.key else data
             return self._json(200, body)
         return self._json(404, {"ok": False})
@@ -1260,11 +1535,14 @@ if __name__ == "__main__":
         if not pr.started:
             sys.exit(f"could not bind the presence relay on {pr.addr} — "
                      "is another relay already running?")
+        pr.start_beacon()
         print(f"wiregate presence relay on {pr.addr} (user {pr.user})")
         print(pr.describe())
         scheme = "https" if (pr.tls and pr._server_ctx is not None) else "http"
         print(f"players join with MRFLUFFY_GATE_URL={scheme}://<this-host>:PORT "
               "plus MRFLUFFY_WIRE_KEY (same phrase, relay + players)")
+        print(f"this door shouts itself at {pr.advertise_url} "
+              "(MRFLUFFY_WIRE_URL to override)")
         if scheme == "https":
             print(f"a player on another host must also pin the relay cert: "
                   f"MRFLUFFY_WIRE_CA={wiretls.CERT_PEM}  (sha256 "

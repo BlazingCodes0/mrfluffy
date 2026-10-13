@@ -13,6 +13,12 @@ The live-vision knob has four positions:
               strong machine
     auto      benchmark THIS host once and pick off / delta / capture
 
+The outward connection is also the player's own choice, kept here so it is never
+hardcoded: `net_host` is the one address the outward pier gate really dials, and
+`relay_seeds` is the comma-separated list of mesh doors the presence joins (the
+wire's own seeding). An environment variable (`MRFLUFFY_NET_HOST`,
+`MRFLUFFY_GATE_URL`) still overrides the saved choice.
+
 Choosing a default reads the host: os.cpu_count(), the load average, and one
 tiny timed loop. That is a local benchmark only — no network, no tool, no
 subprocess, no model. Everything here stands on the same rule as the rest of
@@ -34,7 +40,10 @@ MODES = ("auto", "off", "delta", "capture")
 DEFAULT = {"live_mode": "auto", "live_effective": "delta",
            "capture_max_pps": 400,
            "walk_speed": 1.0, "fly_speed": 1.9,
-           "boost_mult": 2.2, "look_sensitivity": 1.0}
+           "boost_mult": 2.2, "look_sensitivity": 1.0,
+           # the outward connection — your choice, never hardcoded. Empty means
+           # "use the neutral built-in" (see wiregame.NET_DEFAULT_HOST).
+           "net_host": "", "relay_seeds": ""}
 
 
 def _clamp(v, lo, hi, fallback):
@@ -62,6 +71,8 @@ def load() -> dict:
     d["walk_speed"] = _clamp(d.get("walk_speed"), 0.5, 3.0, 1.0)
     d["boost_mult"] = _clamp(d.get("boost_mult"), 1.0, 6.0, 2.2)
     d["look_sensitivity"] = _clamp(d.get("look_sensitivity"), 0.2, 3.0, 1.0)
+    d["net_host"] = str(d.get("net_host") or "").strip()
+    d["relay_seeds"] = str(d.get("relay_seeds") or "").strip()
     return d
 
 
