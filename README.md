@@ -66,7 +66,7 @@ The Market shows:
 - **Optional (Machine capture):** `tshark` — only needed if you set Machine live mode to `capture`
 - **Optional:** `~/blackhorse/` with `config/` and `logs/` populated to use the Market
 - **Optional:** `~/raven/` with `dye/`, `crow/`, `ids/` and `/tmp/ravenheart/` for WIRE channel + LAN population
-- **Optional:** `opencode serve` running for WIRE/NEWS readouts (warm brain via `brain.py`)
+- **Optional:** `opencode serve` running for WIRE/NEWS readouts (persistent opencode serve via `brain.py`)
 
 ## Quick Start
 
@@ -86,7 +86,7 @@ The Market shows:
    ln -s /path/to/blackhorse ~/blackhorse
    ```
 
-4. **(Optional) Start warm brain** — For readouts:
+4. **(Optional) Start persistent opencode serve** — For readouts:
    ```bash
    opencode serve
    ```
