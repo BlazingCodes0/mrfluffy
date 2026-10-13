@@ -1,2 +1,5 @@
 __pycache__/
 logs/
+
+# wire relay TLS key + self-signed cert — generated locally per host, never commit
+config/wire_tls/
