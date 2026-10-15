@@ -7221,7 +7221,7 @@ class WireVisionTab(QWidget):
 
     def _gm_home(self):
         self._gm_clear()
-        self._gm_title("MR.FLUFFY \u2014 the wire",
+        self._gm_title("MR.FLUFFY: THE WIRE",
                        "You are in the wire. Fly it, read it, live it.")
         for label, slot in (("Resume \u2014 back to the wire", self._close_game_menu),
                             ("\u2699  Settings", self._gm_settings),

@@ -1,12 +1,10 @@
 # Mr.Fluffy: The Wire
 
-Mr.Fluffy is a local-first network sense-making tool. It's split into **two separate readouts** plus a third surface: **Wire Vision** — a low-poly first-person place you can walk, built entirely from local ground truth.
+Mr.Fluffy: The Wire is a local-first network sense-making tool. It's split into **two separate readouts** plus a third surface: **Wire Vision** — a low-poly first-person place you can walk, built entirely from local ground truth.
 
 - **Channel 1 — NEWS reader** (`readout.py`, `news.py`) — Reads headlines and prices, producing a compact JSON readout.
 - **Channel 2 — WIRE king** (`wireout.py`, `wire.py`) — Reads your local network state from `~/raven/` (dye contacts, crow reports, IDS alerts, lifeline heart) and produces its own JSON readout. The `move` field is always a passive, local, lab-authorized observation.
 - **Wire Vision** (`wirevision.py`, `wiregame.py`, `app.py`) — A playable 3D view of the wire. It never calls the brain, never runs tools over the network, and never invents data. Everything is drawn from the same local files the WIRE channel reads.
-
-> **Note:** The GitHub repository is titled *"Mr.Fluffy: The Wire"*, but the application itself remains `mr.fluffy`.
 
 ## How it connects to BlackHorse
 

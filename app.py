@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mr.Fluffy — straight into the wire.
+"""Mr.Fluffy: The Wire — straight into the wire.
 
 Mr.Fluffy opens the playable WIRE (the low-poly first-person read of the local
 network and the rooms that hang off it) and gives it the whole screen. There is
@@ -46,7 +46,7 @@ class Fluffy(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Mr.Fluffy — the wire")
+        self.setWindowTitle("Mr.Fluffy: The Wire")
         self.resize(1180, 760)
         self._daemon = None
         self._wire_busy = False
@@ -54,7 +54,7 @@ class Fluffy(QMainWindow):
         root = QWidget(); self.setCentralWidget(root)
         outer = QVBoxLayout(root)
 
-        title = QLabel("MR.FLUFFY"); title.setStyleSheet("font-size:20px;font-weight:bold;color:#c084fc")
+        title = QLabel("MR.FLUFFY: THE WIRE"); title.setStyleSheet("font-size:20px;font-weight:bold;color:#c084fc")
         self._title = title
         outer.addWidget(title)
 
@@ -119,7 +119,7 @@ class Fluffy(QMainWindow):
         split.setStretchFactor(1, 3)
         outer.addWidget(split, 1)
 
-        footer = QLabel("Mr.Fluffy is the wire: the LAN floor, the rooms that hang "
+        footer = QLabel("Mr.Fluffy: The Wire is the LAN floor, the rooms that hang "
                         "off it, and the sea of information below. Local ground truth "
                         "only — no network pulled in the background.")
         footer.setStyleSheet("color:#9ca3af;font-size:10px")
@@ -335,7 +335,7 @@ def main():
         except Exception:
             pass
     app = QApplication(sys.argv)
-    app.setApplicationName("Mr.Fluffy")
+    app.setApplicationName("Mr.Fluffy: The Wire")
     w = Fluffy()
     w.show()
     QTimer.singleShot(0, w.start_wire)   # straight into the wire, full screen

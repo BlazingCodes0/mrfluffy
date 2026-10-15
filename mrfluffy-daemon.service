@@ -1,5 +1,5 @@
 [Unit]
-Description=Mr.Fluffy readout daemon
+Description=Mr.Fluffy: The Wire readout daemon
 After=default.target
 
 [Service]

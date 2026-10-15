@@ -1,5 +1,5 @@
 [Unit]
-Description=Mr.Fluffy persistent opencode server (warm readout session)
+Description=Mr.Fluffy: The Wire persistent opencode server (warm readout session)
 After=default.target
 
 [Service]
